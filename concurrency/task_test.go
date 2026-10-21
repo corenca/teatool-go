@@ -1,4 +1,4 @@
-package concurrency
+package concurrency_test
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/corenca/teatool-go/concurrency"
 )
 
 var errBoom = errors.New("boom")
@@ -27,11 +29,11 @@ func trackPeak(current, peak *atomic.Int32) {
 func TestMapPreservesOrderAndValues(t *testing.T) {
 	params := []int{0, 1, 2, 3, 4}
 
-	results := Map(context.Background(), params,
+	results := concurrency.Map(context.Background(), params,
 		func(_ context.Context, param int) (int, error) {
 			return param * 10, nil
 		},
-		Config{Limit: 2},
+		concurrency.Config{Limit: 2},
 	)
 
 	if len(results) != len(params) {
@@ -57,14 +59,14 @@ func TestMapLimitsConcurrency(t *testing.T) {
 	const total, limit = 24, 3
 	var current, peak atomic.Int32
 
-	results := Map(context.Background(), make([]int, total),
+	results := concurrency.Map(context.Background(), make([]int, total),
 		func(_ context.Context, _ int) (struct{}, error) {
 			trackPeak(&current, &peak)
 			time.Sleep(5 * time.Millisecond)
 			current.Add(-1)
 			return struct{}{}, nil
 		},
-		Config{Limit: limit},
+		concurrency.Config{Limit: limit},
 	)
 
 	if len(results) != total {
@@ -82,14 +84,14 @@ func TestMapLimitsConcurrency(t *testing.T) {
 func TestMapNonPositiveLimitFallsBackToGOMAXPROCS(t *testing.T) {
 	var current, peak atomic.Int32
 
-	results := Map(context.Background(), make([]int, 4),
+	results := concurrency.Map(context.Background(), make([]int, 4),
 		func(_ context.Context, _ int) (struct{}, error) {
 			trackPeak(&current, &peak)
 			time.Sleep(5 * time.Millisecond)
 			current.Add(-1)
 			return struct{}{}, nil
 		},
-		Config{Limit: -1},
+		concurrency.Config{Limit: -1},
 	)
 
 	for i, result := range results {
@@ -104,9 +106,9 @@ func TestMapNonPositiveLimitFallsBackToGOMAXPROCS(t *testing.T) {
 
 // TestMapEmptyInput 验证空入参返回空结果。
 func TestMapEmptyInput(t *testing.T) {
-	results := Map(context.Background(), nil,
+	results := concurrency.Map(context.Background(), nil,
 		func(_ context.Context, param int) (int, error) { return param, nil },
-		Config{},
+		concurrency.Config{},
 	)
 
 	if len(results) != 0 {
@@ -118,7 +120,7 @@ func TestMapEmptyInput(t *testing.T) {
 func TestMapContinueOnErrorRunsAll(t *testing.T) {
 	var executed atomic.Int32
 
-	results := Map(context.Background(), []int{0, 1, 2},
+	results := concurrency.Map(context.Background(), []int{0, 1, 2},
 		func(_ context.Context, param int) (int, error) {
 			executed.Add(1)
 			if param == 1 {
@@ -126,7 +128,7 @@ func TestMapContinueOnErrorRunsAll(t *testing.T) {
 			}
 			return param, nil
 		},
-		Config{Limit: 2},
+		concurrency.Config{Limit: 2},
 	)
 
 	if got := executed.Load(); got != 3 {
@@ -149,7 +151,7 @@ func TestMapContinueOnErrorRunsAll(t *testing.T) {
 func TestMapStopOnErrorSkipsRemaining(t *testing.T) {
 	var executed atomic.Int32
 
-	results := Map(context.Background(), []int{0, 1, 2, 3},
+	results := concurrency.Map(context.Background(), []int{0, 1, 2, 3},
 		func(_ context.Context, param int) (int, error) {
 			executed.Add(1)
 			if param == 0 {
@@ -157,7 +159,7 @@ func TestMapStopOnErrorSkipsRemaining(t *testing.T) {
 			}
 			return param, nil
 		},
-		Config{Limit: 1, Policy: StopOnError},
+		concurrency.Config{Limit: 1, Policy: concurrency.StopOnError},
 	)
 
 	if got := executed.Load(); got != 1 {
@@ -180,7 +182,7 @@ func TestMapStopOnErrorSkipsRemaining(t *testing.T) {
 func TestMapCancelOnErrorCancelsRunning(t *testing.T) {
 	started := make(chan struct{})
 
-	results := Map(context.Background(), []int{0, 1, 2, 3},
+	results := concurrency.Map(context.Background(), []int{0, 1, 2, 3},
 		func(ctx context.Context, param int) (int, error) {
 			switch param {
 			case 0:
@@ -195,7 +197,7 @@ func TestMapCancelOnErrorCancelsRunning(t *testing.T) {
 				return param, nil
 			}
 		},
-		Config{Limit: 2, Policy: CancelOnError},
+		concurrency.Config{Limit: 2, Policy: concurrency.CancelOnError},
 	)
 
 	if !results[0].Failed() || !errors.Is(results[0].Err, errBoom) {
@@ -213,19 +215,19 @@ func TestMapCancelOnErrorCancelsRunning(t *testing.T) {
 
 // TestMapRecoversPanic 验证任务 panic 被转换为 PanicError。
 func TestMapRecoversPanic(t *testing.T) {
-	results := Map(context.Background(), []int{0, 1},
+	results := concurrency.Map(context.Background(), []int{0, 1},
 		func(_ context.Context, param int) (int, error) {
 			if param == 0 {
 				panic(errBoom)
 			}
 			return param, nil
 		},
-		Config{Limit: 2},
+		concurrency.Config{Limit: 2},
 	)
 
-	var panicErr *PanicError
+	var panicErr *concurrency.PanicError
 	if !errors.As(results[0].Err, &panicErr) {
-		t.Fatalf("0 号任务应返回 *PanicError, Err = %v", results[0].Err)
+		t.Fatalf("0 号任务应返回 *concurrency.PanicError, Err = %v", results[0].Err)
 	}
 	if len(panicErr.Stack) == 0 {
 		t.Errorf("PanicError.Stack 不应为空")
@@ -243,12 +245,12 @@ func TestMapRecoversPanic(t *testing.T) {
 
 // TestMapTaskTimeout 验证超时通过 ctx 传递给任务。
 func TestMapTaskTimeout(t *testing.T) {
-	results := Map(context.Background(), []int{0},
+	results := concurrency.Map(context.Background(), []int{0},
 		func(ctx context.Context, _ int) (int, error) {
 			<-ctx.Done()
 			return 0, ctx.Err()
 		},
-		Config{Limit: 1, TaskTimeout: 20 * time.Millisecond},
+		concurrency.Config{Limit: 1, TaskTimeout: 20 * time.Millisecond},
 	)
 
 	if !errors.Is(results[0].Err, context.DeadlineExceeded) {
@@ -258,12 +260,12 @@ func TestMapTaskTimeout(t *testing.T) {
 
 // TestMapTimeoutDoesNotInterruptUncooperativeTask 验证超时不强杀忽略 ctx 的任务。
 func TestMapTimeoutDoesNotInterruptUncooperativeTask(t *testing.T) {
-	results := Map(context.Background(), []int{0},
+	results := concurrency.Map(context.Background(), []int{0},
 		func(_ context.Context, _ int) (string, error) {
 			time.Sleep(30 * time.Millisecond)
 			return "done", nil
 		},
-		Config{Limit: 1, TaskTimeout: 10 * time.Millisecond},
+		concurrency.Config{Limit: 1, TaskTimeout: 10 * time.Millisecond},
 	)
 
 	if !results[0].Success() || results[0].Value != "done" {
@@ -276,9 +278,9 @@ func TestMapCanceledContextSkipsAll(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	results := Map(ctx, []int{0, 1, 2},
+	results := concurrency.Map(ctx, []int{0, 1, 2},
 		func(_ context.Context, param int) (int, error) { return param, nil },
-		Config{Limit: 2},
+		concurrency.Config{Limit: 2},
 	)
 
 	for i, result := range results {
@@ -297,9 +299,9 @@ func TestMapCancelDuringRun(t *testing.T) {
 	defer cancel()
 	started := make(chan struct{})
 
-	done := make(chan []Result[int, int], 1)
+	done := make(chan []concurrency.Result[int, int], 1)
 	go func() {
-		done <- Map(ctx, []int{0, 1, 2},
+		done <- concurrency.Map(ctx, []int{0, 1, 2},
 			func(ctx context.Context, param int) (int, error) {
 				if param == 0 {
 					close(started)
@@ -308,7 +310,7 @@ func TestMapCancelDuringRun(t *testing.T) {
 				}
 				return param, nil
 			},
-			Config{Limit: 1},
+			concurrency.Config{Limit: 1},
 		)
 	}()
 
@@ -335,13 +337,13 @@ func TestResultPredicates(t *testing.T) {
 	}{
 		{name: "成功", err: nil, success: true},
 		{name: "失败", err: errBoom, failed: true},
-		{name: "未执行", err: ErrNotRun, skipped: true},
-		{name: "包装的未执行", err: fmt.Errorf("wrapped: %w", ErrNotRun), skipped: true},
+		{name: "未执行", err: concurrency.ErrNotRun, skipped: true},
+		{name: "包装的未执行", err: fmt.Errorf("wrapped: %w", concurrency.ErrNotRun), skipped: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Result[int, int]{Param: 1, Err: tt.err}
+			result := concurrency.Result[int, int]{Param: 1, Err: tt.err}
 			if got := result.Success(); got != tt.success {
 				t.Errorf("Success() = %v, 期望 %v", got, tt.success)
 			}
@@ -377,7 +379,7 @@ func TestTask(t *testing.T) {
 
 	ctx := context.Background()
 
-	results := Map(ctx, users, func(ctx context.Context, user User) (int, error) {
+	results := concurrency.Map(ctx, users, func(ctx context.Context, user User) (int, error) {
 		fmt.Printf("开始执行任务，参数: %s\n", user)
 		select {
 		case <-time.After(10 * time.Second):
@@ -385,7 +387,7 @@ func TestTask(t *testing.T) {
 		case <-ctx.Done():
 			return 0, ctx.Err() // 5 秒后 ctx 到期，返回 DeadlineExceeded
 		}
-	}, Config{Limit: 2, TaskTimeout: 5 * time.Second, Policy: CancelOnError})
+	}, concurrency.Config{Limit: 2, TaskTimeout: 5 * time.Second, Policy: concurrency.CancelOnError})
 
 	for idx, res := range results {
 		if res.Success() {
