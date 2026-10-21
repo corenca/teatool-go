@@ -382,12 +382,12 @@ func TestTask(t *testing.T) {
 	results := batch.Map(ctx, users, func(ctx context.Context, user User) (int, error) {
 		fmt.Printf("开始执行任务，参数: %s\n", user)
 		select {
-		case <-time.After(10 * time.Second):
+		case <-time.After(time.Second):
 			return user.Age * 10, nil
 		case <-ctx.Done():
-			return 0, ctx.Err() // 5 秒后 ctx 到期，返回 DeadlineExceeded
+			return 0, ctx.Err() // 500ms 后 ctx 到期，返回 DeadlineExceeded
 		}
-	}, batch.Config{Limit: 2, TaskTimeout: 5 * time.Second, Policy: batch.CancelOnError})
+	}, batch.Config{Limit: 2, TaskTimeout: 500 * time.Millisecond, Policy: batch.CancelOnError})
 
 	for idx, res := range results {
 		if res.Success() {
