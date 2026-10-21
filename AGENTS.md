@@ -6,7 +6,17 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
 ## 项目现状
 
 - 根目录 `teatool.go` 是 `package teatool` 占位（只有 `Hello()`），实际工具都在子包。
-- `batch/` 是当前唯一能力包：带并发上限的批量任务执行器（`Map`）。
+- `batch/`：带并发上限的批量任务执行器（`Map`）。
+- `masking/`：字段与文本脱敏。类型（`Type`）+ 默认格式（`MaskFunc`）分离，
+  内置 10 个业务类型，`Register` 可覆盖或新增；`Mask` 为 fail-closed（未知类型
+  返回 `[REDACTED]`），`MaskText` 为 fail-open（未命中原样返回）。脱敏函数一律
+  不返回 error：运行期无错误通道，只有 `Register` 这类装配期操作才返回 error。
+- `datetime/`：布局常量、时区名与缓存、日/周/月/季边界、逐日序列、显式 `Parse`。
+  日期统一用当日零点的 `time.Time` 表示（不定义 date 类型），边界计算始终在输入
+  时区内进行；时间戳换算交由标准库（`time.Unix` 系列），不重复封装。解析只接受
+  调用方给定的布局，不做格式猜测。
+- 对外 API 单独放一个文件（如 `masking/masking.go`），实现细节放其他文件，
+  包内不导出。
 - 后续工具按**能力**建包（如 `stream`、`pool`），不要再建 `concurrency` 这类领域大包。
   不要求与其他语言版本保持一致，遵循 Go 习惯。
 
