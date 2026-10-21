@@ -354,3 +354,45 @@ func TestResultPredicates(t *testing.T) {
 		})
 	}
 }
+
+type User struct {
+	Name string
+	Age  int
+}
+
+func (u User) String() string {
+	return fmt.Sprintf("User{Name: %s, Age: %d}", u.Name, u.Age)
+}
+
+func TestTask(t *testing.T) {
+	users := []User{
+		User{Name: "Tom", Age: 11},
+		User{Name: "Lucy", Age: 22},
+		User{Name: "Alex", Age: 78},
+		User{Name: "lily", Age: 2},
+		User{Name: "Jack", Age: 18},
+		User{Name: "Corenca", Age: 45},
+		User{Name: "李华", Age: 65},
+	}
+
+	ctx := context.Background()
+
+	results := Map(ctx, users, func(ctx context.Context, user User) (int, error) {
+		fmt.Printf("开始执行任务，参数: %s\n", user)
+		select {
+		case <-time.After(10 * time.Second):
+			return user.Age * 10, nil
+		case <-ctx.Done():
+			return 0, ctx.Err() // 5 秒后 ctx 到期，返回 DeadlineExceeded
+		}
+	}, Config{Limit: 2, TaskTimeout: 5 * time.Second, Policy: CancelOnError})
+
+	for idx, res := range results {
+		if res.Success() {
+			fmt.Printf("idx = %d, age = %d, res = %d\n", idx, users[idx].Age, res.Value)
+		} else {
+			fmt.Printf("idx = %d, error = %s\n", idx, res.Err)
+		}
+
+	}
+}
