@@ -1,5 +1,5 @@
-// Package concurrency 提供带并发上限的批量任务执行能力。
-package concurrency
+// Package batch 提供带并发上限的批量任务执行能力。
+package batch
 
 import (
 	"errors"
@@ -8,7 +8,7 @@ import (
 )
 
 // ErrNotRun 标记任务因失败策略或上下文取消而未执行。
-var ErrNotRun = errors.New("concurrency: task not run")
+var ErrNotRun = errors.New("batch: task not run")
 
 // ErrorPolicy 指定单个任务失败后对整批任务的影响。
 type ErrorPolicy int
@@ -50,7 +50,7 @@ type PanicError struct {
 
 // Error 实现 error 接口。
 func (e *PanicError) Error() string {
-	return fmt.Sprintf("concurrency: task panicked: %v\n%s", e.Value, e.Stack)
+	return fmt.Sprintf("batch: task panicked: %v\n%s", e.Value, e.Stack)
 }
 
 // Unwrap 返回原始 panic 值中的 error，便于用 errors.Is 与 errors.As 判断。
