@@ -1,0 +1,11 @@
+logs/
+**/.DS_Store
+.idea/
+.vscode/
+.superpowers/
+**/build/
+
+# superpowers 工作产物（设计文档、实施计划）与视觉伴侣目录仅留工作区，不入库
+docs/superpowers/
+
+**/temp_test.go
