@@ -32,7 +32,9 @@ type Config struct {
 	// Limit 是同时执行的最大任务数；小于等于 0 时取 runtime.GOMAXPROCS(0)。
 	Limit int
 	// TaskTimeout 是单个任务的超时时间；小于等于 0 表示不限制。
-	// 超时通过 context 协作传递，任务需自行响应 ctx 才会提前结束。
+	// 超时以 context 协作方式传递，本包不会强制中断任务：fn 必须在阻
+	// 塞操作或长循环中检查 ctx.Done() / ctx.Err() 并尽快返回，否则任务
+	// 会一直执行到返回，且不会得到超时错误。
 	TaskTimeout time.Duration
 	// Policy 指定任务失败后的处理方式，零值为 ContinueOnError。
 	Policy ErrorPolicy

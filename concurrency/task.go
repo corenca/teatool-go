@@ -32,27 +32,30 @@ func (r Result[T, R]) Skipped() bool {
 	return errors.Is(r.Err, ErrNotRun)
 }
 
-// Map 以不超过 cfg.Limit 的并发度执行 fn，返回长度与 params 相同、
+// Map 以不超过 config.Limit 的并发度执行 fn，返回长度与 params 相同、
 // 下标一一对应的结果。
 //
 // 未执行的任务（被失败策略或 ctx 取消挡住）其 Err 为 ErrNotRun；fn 内
-// 的 panic 会被恢复为 *PanicError 并记录在该任务的结果里。单任务超时
-// 通过 ctx 协作传递，不会强制中断 fn。
+// 的 panic 会被恢复为 *PanicError 并记录在该任务的结果里。
+//
+// 超时是协作式的：config.TaskTimeout 只给 fn 派生一个带 deadline 的
+// context，本包不会中断 fn。fn 若不响应 ctx（例如直接调用 time.Sleep），
+// 会继续执行到返回，结果按其返回值记录，不会出现超时错误。
 func Map[T, R any](
 	ctx context.Context,
 	params []T,
 	fn func(context.Context, T) (R, error),
-	cfg Config,
+	config Config,
 ) []Result[T, R] {
 	results := make([]Result[T, R], len(params))
-	for i, param := range params {
-		results[i] = Result[T, R]{Param: param, Err: ErrNotRun}
-	}
 	if len(params) == 0 {
 		return results
 	}
+	for i, param := range params {
+		results[i] = Result[T, R]{Param: param, Err: ErrNotRun}
+	}
 
-	workers := cfg.Limit
+	workers := config.Limit
 	if workers <= 0 {
 		workers = runtime.GOMAXPROCS(0)
 	}
@@ -61,7 +64,7 @@ func Map[T, R any](
 	}
 
 	var cancel context.CancelFunc
-	if cfg.Policy == CancelOnError {
+	if config.Policy == CancelOnError {
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
 	}
@@ -71,12 +74,9 @@ func Map[T, R any](
 		stop atomic.Bool
 		wg   sync.WaitGroup
 	)
-	wg.Add(workers)
 
 	for range workers {
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			for {
 				if stop.Load() || ctx.Err() != nil {
 					return
@@ -92,16 +92,16 @@ func Map[T, R any](
 					return
 				}
 
-				results[index] = runTask(ctx, params[index], fn, cfg.TaskTimeout)
+				results[index] = runTask(ctx, params[index], fn, config.TaskTimeout)
 
-				if results[index].Err != nil && cfg.Policy.stopsScheduling() {
+				if results[index].Err != nil && config.Policy.stopsScheduling() {
 					stop.Store(true)
 					if cancel != nil {
 						cancel()
 					}
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
