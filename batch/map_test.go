@@ -368,13 +368,13 @@ func (u User) String() string {
 
 func TestTask(t *testing.T) {
 	users := []User{
-		User{Name: "Tom", Age: 11},
-		User{Name: "Lucy", Age: 22},
-		User{Name: "Alex", Age: 78},
-		User{Name: "lily", Age: 2},
-		User{Name: "Jack", Age: 18},
-		User{Name: "Corenca", Age: 45},
-		User{Name: "李华", Age: 65},
+		{Name: "Tom", Age: 11},
+		{Name: "Lucy", Age: 22},
+		{Name: "Alex", Age: 78},
+		{Name: "lily", Age: 2},
+		{Name: "Jack", Age: 18},
+		{Name: "Corenca", Age: 45},
+		{Name: "李华", Age: 65},
 	}
 
 	ctx := context.Background()
