@@ -15,6 +15,10 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   日期统一用当日零点的 `time.Time` 表示（不定义 date 类型），边界计算始终在输入
   时区内进行；时间戳换算交由标准库（`time.Unix` 系列），不重复封装。解析只接受
   调用方给定的布局，不做格式猜测。
+- `filesplit/`：大文件按行切分。`SplitByLines` 按每份行数、`SplitByParts` 按份数，
+  `CountLines` 单独统计行数。整文件不读入内存，行内容与 `\n`/`\r\n` 原样拷贝；
+  命名 `<原名>_part_<序号><扩展名>`，序号按总份数补零；返回绝对路径列表，
+  中途失败清理已写出的子文件，空文件不产生子文件。
 - 对外 API 单独放一个文件（如 `masking/masking.go`），实现细节放其他文件，
   包内不导出。
 - 后续工具按**能力**建包（如 `stream`、`pool`），不要再建 `concurrency` 这类领域大包。
