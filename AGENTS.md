@@ -24,6 +24,11 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   `UniqueName` 处理上传文件名与目录穿越；`Copy`/`Move` 只处理单个普通文件、
   不覆盖、拒绝符号链接，Copy 精确保持源权限位；`ListFiles` 递归返回普通文件
   绝对路径并跳过符号链接。
+- `collection/`：集合与序列工具。`Set` 无序、`OrderedSet` 保持首次插入顺序，
+  都支持增删查、`Clone`、`Values` 与并/交/差/相等，非并发安全；`SplitBySize`
+  按每份数量、`SplitByParts` 按份数（余数靠前，与 `filesplit` 口径一致），
+  参数非法返回 error，子切片共享底层数组但容量裁剪；`Dedupe` 保序去重并返回
+  独立切片。
 - 对外 API 单独放一个文件（如 `masking/masking.go`），实现细节放其他文件，
   包内不导出。
 - 后续工具按**能力**建包（如 `stream`、`pool`），不要再建 `concurrency` 这类领域大包。
