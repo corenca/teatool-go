@@ -19,6 +19,11 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   `CountLines` 单独统计行数。整文件不读入内存，行内容与 `\n`/`\r\n` 原样拷贝；
   命名 `<原名>_part_<序号><扩展名>`，序号按总份数补零；返回绝对路径列表，
   中途失败清理已写出的子文件，空文件不产生子文件。
+- `fsutil/`：业务文件系统工具。`Exists`/`IsFile`/`IsDir` 区分"不存在"与
+  "无权限"；`EnsureParent` 为文件路径建父目录；`SanitizeFileName`、`JoinWithin`、
+  `UniqueName` 处理上传文件名与目录穿越；`Copy`/`Move` 只处理单个普通文件、
+  不覆盖、拒绝符号链接，Copy 精确保持源权限位；`ListFiles` 递归返回普通文件
+  绝对路径并跳过符号链接。
 - 对外 API 单独放一个文件（如 `masking/masking.go`），实现细节放其他文件，
   包内不导出。
 - 后续工具按**能力**建包（如 `stream`、`pool`），不要再建 `concurrency` 这类领域大包。
@@ -31,6 +36,7 @@ go test ./...                  # 全部测试
 go test ./batch -run TestMap   # 单个/一组测试
 go test ./... -race -count=1   # 提交前：开竞态检测并禁用缓存
 go vet ./...                   # 提交前
+go fix ./...                   # 提交前：应用当前 Go 版本的现代化修复
 gofmt -l .                     # 提交前检查；有输出则 gofmt -w .
 ```
 
