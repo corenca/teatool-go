@@ -33,6 +33,8 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
 - `storage/`：对象存储 SPI（19 个方法：判存、读写（含区间）、分片上传、磁盘上传下载、
   列举（含目录视图）、批量/前缀删除、复制移动、预签名），零第三方依赖；
   `storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、OBS、MinIO。
+  `storage/service.go` 提供单桶适配器 `Service`（`NewService(client, bucket)`），
+  18 个桶内方法 + `Bucket()`，`Copy`/`Move` 收窄为桶内；跨桶操作仍用 `Client`。
   跨厂商固定动作：批量删除一律带 `Content-MD5`（OSS/COS 强制）；region 自动去
   `oss-` 前缀；metadata 键统一小写；`Put` 超过 `PartSize`（默认 8MiB）自动转
   multipart；预签名上传不约束 Content-Type（SDK 会剥离该头）。真实服务测试有两处
