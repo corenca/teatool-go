@@ -1,0 +1,5 @@
+# 本目录只提交连接配置模板（*.txt.template）：真实配置文件（oss.txt
+# 等，含密钥）由测试执行者本地复制模板后填写，不入库。
+*
+!.gitignore
+!*.txt.template

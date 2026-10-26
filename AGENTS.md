@@ -1,7 +1,8 @@
 # teatool-go
 
 Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.2）。作者 Corenca。
-零第三方依赖，无 CI、Makefile、linter 配置，不要假设它们存在。
+核心包零第三方依赖；唯一的例外是 `storage/s3`（引入 aws-sdk-go-v2）。
+无 CI、Makefile、linter 配置，不要假设它们存在。
 
 ## 项目现状
 
@@ -29,6 +30,14 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   按每份数量、`SplitByParts` 按份数（余数靠前，与 `filesplit` 口径一致），
   参数非法返回 error，子切片共享底层数组但容量裁剪；`Dedupe` 保序去重并返回
   独立切片。
+- `storage/`：对象存储 SPI（19 个方法：判存、读写（含区间）、分片上传、磁盘上传下载、
+  列举（含目录视图）、批量/前缀删除、复制移动、预签名），零第三方依赖；
+  `storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、OBS、MinIO。
+  跨厂商固定动作：批量删除一律带 `Content-MD5`（OSS/COS 强制）；region 自动去
+  `oss-` 前缀；metadata 键统一小写；`Put` 超过 `PartSize`（默认 8MiB）自动转
+  multipart；预签名上传不约束 Content-Type（SDK 会剥离该头）。真实服务测试有两处
+  配置来源：包内的 `storage/s3/s3_test.json`（模板 `s3_test.json.template` 入库）
+  与 `docs/config/{s3,oss,cos,obs}.txt`；配置缺失或服务连不上时跳过对应用例。
 - 对外 API 单独放一个文件（如 `masking/masking.go`），实现细节放其他文件，
   包内不导出。
 - 后续工具按**能力**建包（如 `stream`、`pool`），不要再建 `concurrency` 这类领域大包。
@@ -37,7 +46,8 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
 ## 常用命令
 
 ```bash
-go test ./...                  # 全部测试
+go test ./...                  # 全部测试（含 storage/s3 真实连接，约 30 秒）
+go test -short ./...           # 跳过真实连接测试
 go test ./batch -run TestMap   # 单个/一组测试
 go test ./... -race -count=1   # 提交前：开竞态检测并禁用缓存
 go vet ./...                   # 提交前
@@ -68,6 +78,10 @@ gofmt -l .                     # 提交前检查；有输出则 gofmt -w .
 - 测试放在外部测试包 `package batch_test`，通过 `batch.` 调用公开 API；不要改回 `package batch`。
 - 采用 TDD：先写失败测试，再实现。
 - 并发/取消相关测试必须能配合 `-race` 稳定通过，避免依赖过紧的时序断言。
+- **真实服务测试配置**：每个后端包的测试读同目录的 `<pkg>_test.json`（如
+  `storage/s3/s3_test.json`），只把 `<pkg>_test.json.template` 入库，真实文件
+  由 `storage/.gitignore` 忽略。执行时先探测连接，文件缺失或连不上就 `t.Skip`；
+  只要服务可用就必须走真实 API，不用假客户端替代。
 
 ## Git 约定
 

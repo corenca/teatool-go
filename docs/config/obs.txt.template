@@ -1,0 +1,8 @@
+# 华为云 OBS 连接配置模板：复制本文件为 obs.txt（同目录）并填入真实值。
+# 值为 JSON 字符串，键名与 ObsSettings 字段一致；region 可省略——私有化
+# 部署无 region 概念时删除该行即可（OBS 签名不校验区域值）。
+endpoint: "https://obs.cn-southwest-2.myhuaweicloud.com"
+access_key_id: "your-access-key-id"
+secret_access_key: "your-secret-access-key"
+bucket: "your-bucket-name"
+region: "cn-southwest-2"

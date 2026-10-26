@@ -1,0 +1,9 @@
+# AWS S3（及 S3 兼容端点）连接配置模板：复制本文件为 s3.txt（同目录）
+# 并填入真实值。值为 JSON 字符串，键名与 S3Settings 字段一致；region
+# 仅供签名，私有化部署（如 MinIO）可省略——S3 兼容端点可直接复用
+# OSS 的 AK/SK/桶（本仓库实证于阿里云 OSS 的 S3 兼容端点）。
+endpoint: "https://oss-cn-chengdu.aliyuncs.com"
+access_key_id: "your-access-key-id"
+secret_access_key: "your-secret-access-key"
+bucket: "your-bucket-name"
+# region: "us-east-1"

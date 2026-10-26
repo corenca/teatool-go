@@ -1,0 +1,10 @@
+# 腾讯云 COS 连接配置模板：复制本文件为 cos.txt（同目录）并填入真实值。
+# 值为 JSON 字符串，键名与 CosSettings 字段一致；bucket 须为含 appid 的
+# 完整桶名。region 可省略：省略时 endpoint 必填且须为含桶前缀的完整
+# 地址（Endpoint 建连，适配私有化/自定义域名部署）；填写 region 时
+# endpoint 可省略。
+endpoint: "https://your-bucket-1250000000.cos.ap-chengdu.myqcloud.com"
+access_key_id: "your-secret-id"
+secret_access_key: "your-secret-key"
+bucket: "your-bucket-1250000000"
+# region: "ap-chengdu"

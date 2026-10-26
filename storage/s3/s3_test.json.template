@@ -1,0 +1,9 @@
+{
+  "endpoint": "http://localhost:9000",
+  "region": "",
+  "accessKeyId": "your-access-key-id",
+  "secretAccessKey": "your-secret-access-key",
+  "usePathStyle": true,
+  "checksum": "when_required",
+  "bucket": "your-bucket"
+}

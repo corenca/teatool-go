@@ -1,0 +1,131 @@
+package s3
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"github.com/corenca/teatool-go/storage"
+)
+
+// Stat 返回对象元信息（head 语义）。
+func (c *Client) Stat(ctx context.Context, bucket, key string) (storage.ObjectInfo, error) {
+	out, err := c.sdk.HeadObject(ctx, &awss3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return storage.ObjectInfo{}, mapError(err)
+	}
+	return storage.ObjectInfo{
+		Key:          key,
+		Size:         aws.ToInt64(out.ContentLength),
+		LastModified: aws.ToTime(out.LastModified),
+		ETag:         trimETag(out.ETag),
+		ContentType:  aws.ToString(out.ContentType),
+		Metadata:     lowerMetadata(out.Metadata),
+	}, nil
+}
+
+// Exists 判断对象是否存在；权限等错误原样返回。
+func (c *Client) Exists(ctx context.Context, bucket, key string) (bool, error) {
+	_, err := c.Stat(ctx, bucket, key)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, storage.ErrObjectNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// Get 返回对象内容流；区间请求时 Info.Size 为对象总大小。
+func (c *Client) Get(ctx context.Context, bucket, key string, opts storage.ReaderOptions) (*storage.Reader, error) {
+	input := &awss3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}
+	if opts.Range != nil {
+		header, err := rangeHeader(*opts.Range)
+		if err != nil {
+			return nil, err
+		}
+		input.Range = aws.String(header)
+	}
+
+	out, err := c.sdk.GetObject(ctx, input)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	info := storage.ObjectInfo{
+		Key:          key,
+		Size:         aws.ToInt64(out.ContentLength),
+		LastModified: aws.ToTime(out.LastModified),
+		ETag:         trimETag(out.ETag),
+		ContentType:  aws.ToString(out.ContentType),
+		Metadata:     lowerMetadata(out.Metadata),
+	}
+	if total, ok := contentRangeTotal(aws.ToString(out.ContentRange)); ok {
+		info.Size = total
+	}
+	return &storage.Reader{ReadCloser: out.Body, Info: info}, nil
+}
+
+// GetBytes 把对象内容读入内存。
+func (c *Client) GetBytes(ctx context.Context, bucket, key string, opts storage.ReaderOptions) ([]byte, error) {
+	reader, err := c.Get(ctx, bucket, key, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+// rangeHeader 把前闭后开区间转成 HTTP Range 头；End < 0 表示到对象结尾。
+func rangeHeader(r storage.ByteRange) (string, error) {
+	if r.Start < 0 || (r.End >= 0 && r.End <= r.Start) {
+		return "", fmt.Errorf("%w: 非法字节区间 [%d, %d)", storage.ErrInvalidArgument, r.Start, r.End)
+	}
+	if r.End < 0 {
+		return fmt.Sprintf("bytes=%d-", r.Start), nil
+	}
+	return fmt.Sprintf("bytes=%d-%d", r.Start, r.End-1), nil
+}
+
+// contentRangeTotal 从 "bytes 10-19/100" 中解析对象总大小。
+func contentRangeTotal(contentRange string) (int64, bool) {
+	i := strings.LastIndex(contentRange, "/")
+	if i < 0 || i == len(contentRange)-1 {
+		return 0, false
+	}
+	total, err := strconv.ParseInt(contentRange[i+1:], 10, 64)
+	if err != nil || total < 0 {
+		return 0, false
+	}
+	return total, true
+}
+
+// trimETag 去掉 S3 返回的 ETag 引号。
+func trimETag(etag *string) string {
+	return strings.Trim(aws.ToString(etag), `"`)
+}
+
+// lowerMetadata 把用户元数据的键统一为小写。
+func lowerMetadata(metadata map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	lowered := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		lowered[strings.ToLower(key)] = value
+	}
+	return lowered
+}
