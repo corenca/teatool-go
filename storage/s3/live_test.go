@@ -58,12 +58,6 @@ func loadLiveConfig(t *testing.T, vendor string) liveConfig {
 	return cfg
 }
 
-// testConfig 是 s3_test.json 的结构：Config 字段平铺，另加测试用 bucket。
-type testConfig struct {
-	s3.Config
-	Bucket string `json:"bucket"`
-}
-
 // loadTestConfig 读取同目录的 s3_test.json；文件缺失或服务连不上时跳过。
 func loadTestConfig(t *testing.T) (*s3.Client, string) {
 	t.Helper()
@@ -72,7 +66,7 @@ func loadTestConfig(t *testing.T) (*s3.Client, string) {
 	if err != nil {
 		t.Skipf("缺少 s3_test.json（可从 s3_test.json.template 复制），跳过真实服务测试")
 	}
-	var cfg testConfig
+	var cfg s3.Config
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("解析 s3_test.json 失败: %v", err)
 	}
@@ -80,7 +74,7 @@ func loadTestConfig(t *testing.T) (*s3.Client, string) {
 		t.Fatalf("s3_test.json 缺少 bucket")
 	}
 
-	client, err := s3.New(cfg.Config)
+	client, err := s3.New(cfg)
 	if err != nil {
 		t.Fatalf("创建客户端失败: %v", err)
 	}

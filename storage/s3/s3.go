@@ -24,15 +24,16 @@ const (
 	ChecksumAlways ChecksumMode = "always"
 )
 
-// Config 是 S3 客户端配置。
+// Config 是 S3 客户端配置。字段统一用小驼峰 tag，供配置库解码。
 type Config struct {
-	Endpoint        string       `json:"endpoint" toml:"endpoint"`               // 为空时使用 AWS 默认端点；可带桶前缀（COS 常见形态）
-	Region          string       `json:"region" toml:"region"`                   // 为空时回退 us-east-1；OSS 的 oss- 前缀会被去掉
-	AccessKeyID     string       `json:"accessKeyId" toml:"accessKeyId"`         // 访问密钥 ID
-	SecretAccessKey string       `json:"secretAccessKey" toml:"secretAccessKey"` // 访问密钥
-	UsePathStyle    bool         `json:"usePathStyle" toml:"usePathStyle"`       // MinIO 与私有化部署常需要
-	Checksum        ChecksumMode `json:"checksum" toml:"checksum"`               // 为空时使用 ChecksumWhenRequired
-	HTTPClient      *http.Client `json:"-" toml:"-"`                             // 为空时使用 SDK 默认
+	Endpoint        string       `json:"endpoint" mapstructure:"endpoint"`               // 为空时使用 AWS 默认端点；可带桶前缀（COS 常见形态）
+	Region          string       `json:"region" mapstructure:"region"`                   // 为空时回退 us-east-1；OSS 的 oss- 前缀会被去掉
+	AccessKeyID     string       `json:"accessKeyId" mapstructure:"accessKeyId"`         // 访问密钥 ID
+	SecretAccessKey string       `json:"secretAccessKey" mapstructure:"secretAccessKey"` // 访问密钥
+	UsePathStyle    bool         `json:"usePathStyle" mapstructure:"usePathStyle"`       // MinIO 与私有化部署常需要
+	Checksum        ChecksumMode `json:"checksum" mapstructure:"checksum"`               // 为空时使用 ChecksumWhenRequired
+	Bucket          string       `json:"bucket" mapstructure:"bucket"`                   // 可为空，仅在构造 storage.Service 时使用
+	HTTPClient      *http.Client `json:"-" mapstructure:"-"`                             // 为空时使用 SDK 默认
 }
 
 // Client 是 S3 客户端，实现 storage.Client。
@@ -82,5 +83,12 @@ func New(config Config) (*Client, error) {
 	return &Client{config: config, sdk: sdkClient}, nil
 }
 
-// 编译期断言：S3 客户端完整实现契约。
-var _ storage.Client = (*Client)(nil)
+// 编译期断言：S3 客户端完整实现契约，并向工厂提供配置里的桶名。
+var (
+	_ storage.Client   = (*Client)(nil)
+	_ storage.Bucketer = (*Client)(nil)
+)
+
+// Bucket 返回配置里的桶名，供 storage 工厂构造单桶 Service。Client 自身的
+// 操作仍按调用传桶；桶名为空表示未配置。
+func (c *Client) Bucket() string { return c.config.Bucket }

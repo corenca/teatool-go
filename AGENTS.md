@@ -35,11 +35,18 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   `storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、OBS、MinIO。
   `storage/service.go` 提供单桶适配器 `Service`（`NewService(client, bucket)`），
   18 个桶内方法 + `Bucket()`，`Copy`/`Move` 收窄为桶内；跨桶操作仍用 `Client`。
+  `storage/factory.go` 提供客户端工厂：`NewFactory(decoder)` 注入配置解码，
+  `RegisterBackend(f, name, ctor)` 泛型注册（如 `storage.RegisterBackend(f, "s3", s3.New)`），
+  `NewClient`/`NewService` 按名字构造；桶名由驱动实现可选接口 `Bucketer` 提供，
+  未注册的后端返回 `ErrBackendNotFound`。`s3.Config` 字段用小驼峰 `mapstructure`
+  tag，`Bucket` 可空且只在 `NewService` 时使用。
   跨厂商固定动作：批量删除一律带 `Content-MD5`（OSS/COS 强制）；region 自动去
   `oss-` 前缀；metadata 键统一小写；`Put` 超过 `PartSize`（默认 8MiB）自动转
-  multipart；预签名上传不约束 Content-Type（SDK 会剥离该头）。真实服务测试有两处
-  配置来源：包内的 `storage/s3/s3_test.json`（模板 `s3_test.json.template` 入库）
-  与 `docs/config/{s3,oss,cos,obs}.txt`；配置缺失或服务连不上时跳过对应用例。
+  multipart；预签名上传不约束 Content-Type（SDK 会剥离该头）。真实服务测试配置
+  统一放各后端包内的 `<pkg>_test.json`（模板 `<pkg>_test.json.template` 入库，
+  真实文件由 `storage/.gitignore` 忽略）；`storage/s3` 另有 `docs/config/`
+  下的 `{s3,oss,cos,obs}.txt` 作为四厂商真实连接的遗留来源，不再新增。配置缺失
+  或服务连不上时跳过对应用例。
 - 对外 API 单独放一个文件（如 `masking/masking.go`），实现细节放其他文件，
   包内不导出。
 - 后续工具按**能力**建包（如 `stream`、`pool`），不要再建 `concurrency` 这类领域大包。
