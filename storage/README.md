@@ -39,9 +39,9 @@ err = client.PutBytes(ctx, "bucket", "a/b.txt", []byte("hello"), storage.WriterO
   `ErrObjectNotFound`；只有服务端返回 `NoSuchBucket` 错误体的接口才会给出
   `ErrBucketNotFound`。
 - **错误分类**：`ErrObjectNotFound`、`ErrBucketNotFound`、`ErrAccessDenied`、
-  `ErrPreconditionFailed`、`ErrInvalidRange`、`ErrUnsupported`、`ErrInvalidArgument`，
-  全部可用 `errors.Is` 判断。批量删除的单个失败是 `*storage.DeleteError`，可用
-  `errors.As` 取出 `Key`。
+  `ErrPreconditionFailed`（服务端 412）、`ErrInvalidRange`、`ErrUnsupported`、
+  `ErrInvalidArgument`，全部可用 `errors.Is` 判断。批量删除的单个失败是
+  `*storage.DeleteError`，可用 `errors.As` 取出 `Key`。
 - **区间读取**：`ByteRange` 前闭后开；`End < 0` 表示到结尾；`Start < 0` 表示
   末尾 `|Start|` 字节。起点越界返回空流而不是错误。
 - **写入**：`Put` 返回 `Writer`，`Close` 提交、`Abort` 放弃。`Close` 失败或
@@ -101,6 +101,8 @@ service, err := factory.NewService("s3", rawConfig) // 绑定 Config.Bucket 的 
 - `PresignGet` 的 `FileName` 按 RFC 6266 生成 `Content-Disposition`，中文文件名
   同时带 ASCII 回退与 `filename*=UTF-8''`。
 - `ETag` 不承诺是 MD5：OSS 与分片上传的算法与 S3 不同，需要校验请自行比对内容。
+- 服务端不支持某项能力时返回 `ErrUnsupported`（HTTP 501 / `NotImplemented`），
+  例如旧端点拒绝 `aws-chunked` 校验。
 
 ## 明确的非目标
 

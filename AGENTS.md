@@ -47,11 +47,14 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   `Writer` 契约是 `Write`/`Close`/`Abort`：`Close` 提交、`Abort` 放弃并回收分片；
   `PartSize` 限 `[5MiB, 5GiB]`，分片并发默认 3；失败路径必须 Abort，不得提交截断
   对象。`Copy` 超过 5GiB 走分片复制并保留源元信息；`Download` 用同目录临时文件
-  + rename 保证原子；`DeletePrefix` 逐页列举删除，不整批入内存。真实服务测试配置
-  统一放各后端包内的 `<pkg>_test.json`（模板 `<pkg>_test.json.template` 入库，
-  真实文件由 `storage/.gitignore` 忽略）；`storage/s3` 另有 `docs/config/`
-  下的 `{s3,oss,cos,obs}.txt` 作为四厂商真实连接的遗留来源，不再新增。配置缺失
-  或服务连不上时跳过对应用例。
+  + rename 保证原子；`DeletePrefix` 逐页列举删除，不整批入内存。
+  错误统一用哨兵 + `errors.Is`（对象/桶缺失、AccessDenied、412、InvalidRange、
+  501 不支持、InvalidArgument）；批量删除的单项失败是 `*DeleteError`。非目标：
+  桶管理、条件写（所有上传都是覆盖写）、断点续传、重试与限速。
+  真实服务测试配置统一放各后端包内的 `<pkg>_test.json`（模板
+  `<pkg>_test.json.template` 入库，真实文件由 `storage/.gitignore` 忽略）；
+  `storage/s3` 另有 `docs/config/` 下的 `{s3,oss,cos,obs}.txt` 作为四厂商真实
+  连接的遗留来源，不再新增。配置缺失或服务连不上时跳过对应用例。
 - 对外 API 单独放一个文件（如 `masking/masking.go`），实现细节放其他文件，
   包内不导出。
 - 后续工具按**能力**建包（如 `stream`、`pool`），不要再建 `concurrency` 这类领域大包。
@@ -60,7 +63,7 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
 ## 常用命令
 
 ```bash
-go test ./...                  # 全部测试（含 storage/s3 真实连接，约 30 秒）
+go test ./...                  # 全部测试（含 storage/s3 真实连接，约 40 秒）
 go test -short ./...           # 跳过真实连接测试
 go test ./batch -run TestMap   # 单个/一组测试
 go test ./... -race -count=1   # 提交前：开竞态检测并禁用缓存
@@ -69,7 +72,7 @@ go fix ./...                   # 提交前：应用当前 Go 版本的现代化�
 gofmt -l .                     # 提交前检查；有输出则 gofmt -w .
 ```
 
-`go test ./...` 约 1 秒；`map_test.go` 的 `TestTask` 是演示用例
+`storage` 之外的包合计约 1 秒；`map_test.go` 的 `TestTask` 是演示用例
 （500ms 超时 / 1s 定时器，只打印无断言）。
 
 ## batch 包的既定语义（改动前先读）
@@ -96,6 +99,8 @@ gofmt -l .                     # 提交前检查；有输出则 gofmt -w .
   `storage/s3/s3_test.json`），只把 `<pkg>_test.json.template` 入库，真实文件
   由 `storage/.gitignore` 忽略。执行时先探测连接，文件缺失或连不上就 `t.Skip`；
   只要服务可用就必须走真实 API，不用假客户端替代。
+- `docs/config/<vendor>.txt` 的 `use_path_style: "true"` 会被 `loadLiveConfig`
+  解析：本地用 RustFS/MinIO 验证 s3 槽位时必须打开，否则虚拟托管寻址会失败。
 
 ## Git 约定
 
