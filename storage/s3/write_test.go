@@ -133,3 +133,119 @@ func TestWriterCanceledLeavesNoObject(t *testing.T) {
 		t.Fatal("未完成的分片上传不应产生可见对象")
 	}
 }
+
+// TestPutRejectsInvalidPartSize 校验分片大小在发请求前就被拒绝。
+func TestPutRejectsInvalidPartSize(t *testing.T) {
+	client := newOfflineClient(t)
+
+	cases := map[string]int{
+		"小于5MiB": storage.MinPartSize - 1,
+		"超过5GiB": storage.MaxPartSize + 1,
+	}
+	for name, partSize := range cases {
+		_, err := client.Put(t.Context(), "bucket", "k", storage.WriterOptions{PartSize: partSize})
+		t.Logf("PartSize=%s(%d) error = %v", name, partSize, err)
+		if !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Fatalf("%s: 期望 ErrInvalidArgument，实际 %v", name, err)
+		}
+	}
+}
+
+// TestPutRejectsNegativeConcurrency 校验并发数不能为负。
+func TestPutRejectsNegativeConcurrency(t *testing.T) {
+	client := newOfflineClient(t)
+
+	_, err := client.Put(t.Context(), "bucket", "k", storage.WriterOptions{Concurrency: -1})
+	t.Logf("Concurrency=-1 error = %v", err)
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("期望 ErrInvalidArgument，实际 %v", err)
+	}
+}
+
+// TestWriterAbortLeavesNoObject 校验 Abort 放弃已开始的分片上传。
+func TestWriterAbortLeavesNoObject(t *testing.T) {
+	client, bucket, prefix := newTestContext(t)
+	ctx := t.Context()
+	key := prefix + "aborted.bin"
+
+	writer, err := client.Put(ctx, bucket, key, storage.WriterOptions{PartSize: 5 << 20})
+	if err != nil {
+		t.Fatalf("Put 失败: %v", err)
+	}
+	// 写超一片，确保分片上传已经发起。
+	if _, err := writer.Write(bytes.Repeat([]byte("a"), 5<<20+1)); err != nil {
+		t.Fatalf("Write 失败: %v", err)
+	}
+	if err := writer.Abort(); err != nil {
+		t.Fatalf("Abort 失败: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Abort 后 Close 应返回 nil，实际 %v", err)
+	}
+
+	exists, err := client.Exists(t.Context(), bucket, key)
+	if err != nil {
+		t.Fatalf("Exists 失败: %v", err)
+	}
+	t.Logf("Abort 后 Exists = %v", exists)
+	if exists {
+		t.Fatal("Abort 后不应产生可见对象")
+	}
+}
+
+// TestWriterAbortIsIdempotent 校验重复 Abort 不报错且之后 Write 被拒绝。
+func TestWriterAbortIsIdempotent(t *testing.T) {
+	client, bucket, prefix := newTestContext(t)
+
+	writer, err := client.Put(t.Context(), bucket, prefix+"idempotent.bin", storage.WriterOptions{})
+	if err != nil {
+		t.Fatalf("Put 失败: %v", err)
+	}
+	if err := writer.Abort(); err != nil {
+		t.Fatalf("首次 Abort 失败: %v", err)
+	}
+	if err := writer.Abort(); err != nil {
+		t.Fatalf("重复 Abort 失败: %v", err)
+	}
+	_, err = writer.Write([]byte("late"))
+	t.Logf("Abort 后 Write error = %v", err)
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("期望 ErrInvalidArgument，实际 %v", err)
+	}
+}
+
+// TestPutMultipartConcurrent 校验并发分片上传按分片序提交且内容完整。
+func TestPutMultipartConcurrent(t *testing.T) {
+	client, bucket, prefix := newTestContext(t)
+	ctx := t.Context()
+	key := prefix + "concurrent.bin"
+	// 3 个整片 + 零头，覆盖"并发派发 + 尾部小分片"。
+	payload := bytes.Repeat([]byte("0123456789abcdef"), (16<<20+1234)/16)
+
+	writer, err := client.Put(ctx, bucket, key, storage.WriterOptions{
+		PartSize:    5 << 20,
+		Concurrency: 4,
+	})
+	if err != nil {
+		t.Fatalf("Put 失败: %v", err)
+	}
+	// 分多次写入，制造缓冲区拼接与派发交错。
+	for chunk := 0; chunk < len(payload); chunk += 1 << 20 {
+		end := min(chunk+1<<20, len(payload))
+		if _, err := writer.Write(payload[chunk:end]); err != nil {
+			t.Fatalf("Write 失败: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close 失败: %v", err)
+	}
+
+	got, err := client.GetBytes(ctx, bucket, key, storage.ReaderOptions{})
+	if err != nil {
+		t.Fatalf("GetBytes 失败: %v", err)
+	}
+	t.Logf("并发分片上传：写入 %d 字节，读回 %d 字节", len(payload), len(got))
+	if !bytes.Equal(got, payload) {
+		t.Fatal("并发分片上传内容与原数据不一致")
+	}
+}

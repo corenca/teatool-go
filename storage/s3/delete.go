@@ -22,10 +22,11 @@ func (c *Client) Delete(ctx context.Context, bucket, key string) error {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if errors.Is(mapError(err), storage.ErrObjectNotFound) {
+		mapped := mapError(err)
+		if errors.Is(mapped, storage.ErrObjectNotFound) {
 			return nil
 		}
-		return err
+		return mapped
 	}
 	return nil
 }
@@ -46,29 +47,44 @@ func (c *Client) DeleteMany(ctx context.Context, bucket string, keys []string) e
 			continue
 		}
 		for _, item := range out.Errors {
-			errs = append(errs, fmt.Errorf("storage: 删除 %s 失败: %s", aws.ToString(item.Key), aws.ToString(item.Message)))
+			errs = append(errs, &storage.DeleteError{
+				Key: aws.ToString(item.Key),
+				Err: errors.New(aws.ToString(item.Message)),
+			})
 		}
 	}
 	return errors.Join(errs...)
 }
 
 // DeletePrefix 删除前缀下的全部对象；空前缀会被拒绝以免清空整个桶。
+//
+// 逐页列举后再删除该页，内存占用与对象总数无关；中途失败会继续删除后续页面，
+// 最后一并返回聚合错误。删除期间新写入该前缀的对象不在本次范围内。
 func (c *Client) DeletePrefix(ctx context.Context, bucket, prefix string) error {
 	if prefix == "" {
 		return fmt.Errorf("%w: 删除前缀不能为空", storage.ErrInvalidArgument)
 	}
-	objects, err := c.ListAll(ctx, bucket, prefix)
-	if err != nil {
-		return err
+	var errs []error
+	cursor := ""
+	for {
+		page, err := c.List(ctx, bucket, storage.ListOptions{Prefix: prefix, Cursor: cursor})
+		if err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		if len(page.Objects) > 0 {
+			keys := make([]string, 0, len(page.Objects))
+			for _, object := range page.Objects {
+				keys = append(keys, object.Key)
+			}
+			if err := c.DeleteMany(ctx, bucket, keys); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if page.NextCursor == "" {
+			return errors.Join(errs...)
+		}
+		cursor = page.NextCursor
 	}
-	if len(objects) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(objects))
-	for _, object := range objects {
-		keys = append(keys, object.Key)
-	}
-	return c.DeleteMany(ctx, bucket, keys)
 }
 
 // splitKeys 按批大小切分 key 列表。

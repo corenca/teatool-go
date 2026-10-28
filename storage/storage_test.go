@@ -27,7 +27,7 @@ func TestResultJSONShape(t *testing.T) {
 				ContentType:  "text/plain",
 				Metadata:     map[string]string{"k": "v"},
 			},
-			want: `{"key":"a.txt","size":12,"lastModified":"1970-01-01T00:00:00Z","etag":"e","contentType":"text/plain","metadata":{"k":"v"}}`,
+			want: `{"key":"a.txt","size":12,"lastModified":"1970-01-01T00:00:00Z","etag":"e","contentType":"text/plain","contentDisposition":"","cacheControl":"","storageClass":"","metadata":{"k":"v"}}`,
 		},
 		{
 			name: "ListPage",
@@ -90,7 +90,7 @@ func TestResultString(t *testing.T) {
 		{
 			name: "ObjectInfo",
 			got:  info.String(),
-			want: "ObjectInfo(key: a.txt, size: 12, lastModified: 1970-01-01T00:00:00Z, etag: e, contentType: text/plain, metadata: map[k:v])",
+			want: "ObjectInfo(key: a.txt, size: 12, lastModified: 1970-01-01T00:00:00Z, etag: e, contentType: text/plain, contentDisposition: , cacheControl: , storageClass: , metadata: map[k:v])",
 		},
 		{
 			name: "ByteRange",
@@ -105,12 +105,12 @@ func TestResultString(t *testing.T) {
 				NextCursor:     "c1",
 				PageSize:       10,
 			}.String(),
-			want: "ListPage(objects: [ObjectInfo(key: a.txt, size: 12, lastModified: 1970-01-01T00:00:00Z, etag: e, contentType: text/plain, metadata: map[k:v])], commonPrefixes: [p/a/], nextCursor: c1, pageSize: 10)",
+			want: "ListPage(objects: [ObjectInfo(key: a.txt, size: 12, lastModified: 1970-01-01T00:00:00Z, etag: e, contentType: text/plain, contentDisposition: , cacheControl: , storageClass: , metadata: map[k:v])], commonPrefixes: [p/a/], nextCursor: c1, pageSize: 10)",
 		},
 		{
 			name: "DirInfo",
 			got:  storage.DirInfo{Prefix: "p/", Dirs: []string{"a"}, Objects: []storage.ObjectInfo{info}}.String(),
-			want: "DirInfo(prefix: p/, dirs: [a], objects: [ObjectInfo(key: a.txt, size: 12, lastModified: 1970-01-01T00:00:00Z, etag: e, contentType: text/plain, metadata: map[k:v])])",
+			want: "DirInfo(prefix: p/, dirs: [a], objects: [ObjectInfo(key: a.txt, size: 12, lastModified: 1970-01-01T00:00:00Z, etag: e, contentType: text/plain, contentDisposition: , cacheControl: , storageClass: , metadata: map[k:v])])",
 		},
 		{
 			name: "PresignedURL",
@@ -126,5 +126,26 @@ func TestResultString(t *testing.T) {
 				t.Fatalf("%s String 不匹配\n got: %s\nwant: %s", tc.name, tc.got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDeleteErrorUnwrap 校验批量删除错误可按 Key 取出、可追溯底层原因。
+func TestDeleteErrorUnwrap(t *testing.T) {
+	inner := errors.New("denied")
+	err := errors.Join(
+		&storage.DeleteError{Key: "a.txt", Err: inner},
+		&storage.DeleteError{Key: "b.txt", Err: errors.New("locked")},
+	)
+	t.Logf("聚合错误 = %v", err)
+
+	var target *storage.DeleteError
+	if !errors.As(err, &target) {
+		t.Fatal("errors.As 未取出 *DeleteError")
+	}
+	if target.Key != "a.txt" {
+		t.Fatalf("首个失败 key = %q, want a.txt", target.Key)
+	}
+	if !errors.Is(err, inner) {
+		t.Fatal("errors.Is 未识别底层错误")
 	}
 }

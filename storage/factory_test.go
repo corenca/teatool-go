@@ -27,7 +27,7 @@ type factoryConfig struct {
 	Bucket   string `json:"bucket" mapstructure:"bucket"`
 }
 
-// factoryClient 用内嵌接口满足 storage.Client 的 19 个方法；测试只读取字段。
+// factoryClient 用内嵌接口满足 storage.Client 的 20 个方法；测试只读取字段。
 type factoryClient struct {
 	storage.Client
 	endpoint string

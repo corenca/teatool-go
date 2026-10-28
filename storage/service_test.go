@@ -34,6 +34,7 @@ type nopWriter struct{}
 
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 func (nopWriter) Close() error                { return nil }
+func (nopWriter) Abort() error                { return nil }
 
 // 固定返回值，用于断言参数与返回值都原样透传。
 var (
@@ -126,6 +127,19 @@ func (f *fakeClient) List(ctx context.Context, bucket string, opts storage.ListO
 func (f *fakeClient) ListAll(ctx context.Context, bucket, prefix string) ([]storage.ObjectInfo, error) {
 	f.record("ListAll", bucket, prefix)
 	return fakeObjects, f.err
+}
+
+func (f *fakeClient) Walk(ctx context.Context, bucket, prefix string, fn func(storage.ObjectInfo) error) error {
+	f.record("Walk", bucket, prefix)
+	if f.err != nil {
+		return f.err
+	}
+	for _, object := range fakeObjects {
+		if err := fn(object); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (f *fakeClient) ListDir(ctx context.Context, bucket, prefix string) (storage.DirInfo, error) {
@@ -332,6 +346,24 @@ func TestServiceForwards(t *testing.T) {
 				assertValue(t, "ListAll", got, fakeObjects, err)
 			},
 			want: []recordedCall{{"ListAll", []any{"demo", "p/"}}},
+		},
+		{
+			name: "Walk",
+			call: func(t *testing.T, svc *storage.Service) {
+				var keys []string
+				err := svc.Walk(ctx, "p/", func(object storage.ObjectInfo) error {
+					keys = append(keys, object.Key)
+					return nil
+				})
+				t.Logf("Walk 收集到 key = %v err = %v", keys, err)
+				if err != nil {
+					t.Fatalf("Walk 返回错误: %v", err)
+				}
+				if len(keys) != len(fakeObjects) {
+					t.Fatalf("Walk 回调 %d 次, want %d", len(keys), len(fakeObjects))
+				}
+			},
+			want: []recordedCall{{"Walk", []any{"demo", "p/"}}},
 		},
 		{
 			name: "ListDir",

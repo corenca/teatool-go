@@ -24,6 +24,7 @@ type liveConfig struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	Bucket          string
+	UsePathStyle    bool
 }
 
 // loadLiveConfig 读取配置；文件缺失时跳过该端点的测试。
@@ -53,8 +54,10 @@ func loadLiveConfig(t *testing.T, vendor string) liveConfig {
 		AccessKeyID:     values["access_key_id"],
 		SecretAccessKey: values["secret_access_key"],
 		Bucket:          values["bucket"],
+		UsePathStyle:    strings.EqualFold(values["use_path_style"], "true"),
 	}
-	t.Logf("配置来源=%s endpoint=%s bucket=%s region=%s", path, cfg.Endpoint, cfg.Bucket, cfg.Region)
+	t.Logf("配置来源=%s endpoint=%s bucket=%s region=%s pathStyle=%v",
+		path, cfg.Endpoint, cfg.Bucket, cfg.Region, cfg.UsePathStyle)
 	return cfg
 }
 
@@ -138,6 +141,7 @@ func TestLive(t *testing.T) {
 				Region:          cfg.Region,
 				AccessKeyID:     cfg.AccessKeyID,
 				SecretAccessKey: cfg.SecretAccessKey,
+				UsePathStyle:    cfg.UsePathStyle,
 				HTTPClient:      &http.Client{Timeout: 60 * time.Second},
 			})
 			if err != nil {

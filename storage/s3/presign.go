@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -22,7 +23,7 @@ func (c *Client) PresignGet(ctx context.Context, bucket, key string, opts storag
 		Key:    aws.String(key),
 	}
 	if opts.FileName != "" {
-		input.ResponseContentDisposition = aws.String(fmt.Sprintf("attachment; filename=%q", opts.FileName))
+		input.ResponseContentDisposition = aws.String(contentDisposition(opts.FileName))
 	}
 
 	presigned, err := awss3.NewPresignClient(c.sdk).PresignGetObject(ctx, input, presignOptions(opts))
@@ -63,6 +64,47 @@ func validatePresign(opts storage.PresignOptions, method string) error {
 		return fmt.Errorf("%w: FileName 仅对 PresignGet 有效", storage.ErrInvalidArgument)
 	}
 	return nil
+}
+
+// contentDisposition 生成 RFC 6266 兼容的下载文件名头：ASCII 回退给旧客户端，
+// filename* 用 RFC 5987 百分号编码传递中文等非 ASCII 文件名。
+func contentDisposition(name string) string {
+	var fallback strings.Builder
+	for _, r := range name {
+		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' {
+			fallback.WriteByte('_')
+			continue
+		}
+		fallback.WriteRune(r)
+	}
+	safe := fallback.String()
+	if safe == "" {
+		safe = "download"
+	}
+	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", safe, escapeRFC5987(name))
+}
+
+// escapeRFC5987 按 RFC 5987 的 attr-char 集合保留字符，其余字节百分号编码。
+func escapeRFC5987(value string) string {
+	var escaped strings.Builder
+	for i := range len(value) {
+		c := value[i]
+		if isAttrChar(c) {
+			escaped.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&escaped, "%%%02X", c)
+	}
+	return escaped.String()
+}
+
+// isAttrChar 判断字节是否属于 RFC 5987 attr-char。
+func isAttrChar(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$&+-.^_`|~", c) >= 0
 }
 
 // presignOptions 把有效期传给 SDK。

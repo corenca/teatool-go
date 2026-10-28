@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,6 +19,8 @@ func (c *Client) List(ctx context.Context, bucket string, opts storage.ListOptio
 	if pageSize <= 0 {
 		pageSize = storage.DefaultListPageSize
 	}
+	// 服务端每页上限 1000，且 SDK 参数是 int32：裁剪避免整数溢出。
+	pageSize = min(pageSize, math.MaxInt32)
 
 	input := &awss3.ListObjectsV2Input{
 		Bucket:  aws.String(bucket),
@@ -53,6 +56,7 @@ func (c *Client) List(ctx context.Context, bucket string, opts storage.ListOptio
 			Size:         aws.ToInt64(object.Size),
 			LastModified: aws.ToTime(object.LastModified),
 			ETag:         trimETag(object.ETag),
+			StorageClass: string(object.StorageClass),
 		})
 	}
 	for _, prefix := range out.CommonPrefixes {
@@ -67,22 +71,42 @@ func (c *Client) List(ctx context.Context, bucket string, opts storage.ListOptio
 // ListAll 自动翻页，返回前缀下的全部对象。
 func (c *Client) ListAll(ctx context.Context, bucket, prefix string) ([]storage.ObjectInfo, error) {
 	var objects []storage.ObjectInfo
+	err := c.Walk(ctx, bucket, prefix, func(object storage.ObjectInfo) error {
+		objects = append(objects, object)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return objects, nil
+}
+
+// Walk 按 key 字典序流式遍历前缀下的对象。
+func (c *Client) Walk(ctx context.Context, bucket, prefix string, fn func(storage.ObjectInfo) error) error {
 	cursor := ""
 	for {
 		page, err := c.List(ctx, bucket, storage.ListOptions{Prefix: prefix, Cursor: cursor})
 		if err != nil {
-			return nil, err
+			return err
 		}
-		objects = append(objects, page.Objects...)
+		for _, object := range page.Objects {
+			if err := fn(object); err != nil {
+				return err
+			}
+		}
 		if page.NextCursor == "" {
-			return objects, nil
+			return nil
 		}
 		cursor = page.NextCursor
 	}
 }
 
 // ListDir 返回某一层级的目录视图：Dirs 只含本层文件夹名。
+//
+// prefix 没有尾部 "/" 时自动补齐（"sql" 视同 "sql/"），避免整层目录被当成
+// 公共前缀而返回空视图；返回的 DirInfo.Prefix 是补齐后的值。
 func (c *Client) ListDir(ctx context.Context, bucket, prefix string) (storage.DirInfo, error) {
+	prefix = dirPrefix(prefix)
 	info := storage.DirInfo{Prefix: prefix}
 	cursor := ""
 	for {
@@ -119,6 +143,14 @@ func (c *Client) ListBuckets(ctx context.Context) ([]string, error) {
 		buckets = append(buckets, aws.ToString(bucket.Name))
 	}
 	return buckets, nil
+}
+
+// dirPrefix 把目录前缀归一化为以 "/" 结尾（空串保持为空）。
+func dirPrefix(prefix string) string {
+	if prefix == "" || strings.HasSuffix(prefix, "/") {
+		return prefix
+	}
+	return prefix + "/"
 }
 
 // encodeCursor 把服务端 continuation-token 编码成不透明游标。

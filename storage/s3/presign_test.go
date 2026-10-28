@@ -46,6 +46,10 @@ func TestPresignGet(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("状态码 = %d", resp.StatusCode)
 	}
+	disposition := resp.Header.Get("Content-Disposition")
+	if !strings.Contains(disposition, "filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf") {
+		t.Fatalf("Content-Disposition 缺少 RFC 5987 文件名: %q", disposition)
+	}
 	if string(got) != string(payload) {
 		t.Fatalf("内容 = %q, want %q", got, payload)
 	}

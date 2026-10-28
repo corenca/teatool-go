@@ -1,6 +1,7 @@
 package s3_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/corenca/teatool-go/storage"
@@ -67,5 +68,46 @@ func TestMove(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("内容 = %q, want %q", got, payload)
+	}
+}
+
+// TestCopyPreservesContentType 校验小对象复制走 CopyObject 时保留内容头。
+func TestCopyPreservesContentType(t *testing.T) {
+	client, bucket, prefix := newTestContext(t)
+	ctx := t.Context()
+	src := prefix + "typed.txt"
+	dst := prefix + "typed-copy.txt"
+
+	err := client.PutBytes(ctx, bucket, src, []byte("x"), storage.WriterOptions{
+		ContentType:  "text/plain; charset=utf-8",
+		CacheControl: "max-age=120",
+	})
+	if err != nil {
+		t.Fatalf("写入源对象失败: %v", err)
+	}
+	if err := client.Copy(ctx, bucket, src, bucket, dst); err != nil {
+		t.Fatalf("Copy 失败: %v", err)
+	}
+	info, err := client.Stat(ctx, bucket, dst)
+	if err != nil {
+		t.Fatalf("Stat 失败: %v", err)
+	}
+	t.Logf("复制后 = %s", info)
+	if info.ContentType != "text/plain; charset=utf-8" {
+		t.Fatalf("ContentType = %q", info.ContentType)
+	}
+	if info.CacheControl != "max-age=120" {
+		t.Fatalf("CacheControl = %q", info.CacheControl)
+	}
+}
+
+// TestCopyMissingSource 校验源对象不存在时返回 ErrObjectNotFound。
+func TestCopyMissingSource(t *testing.T) {
+	client, bucket, prefix := newTestContext(t)
+
+	err := client.Copy(t.Context(), bucket, prefix+"absent.bin", bucket, prefix+"dst.bin")
+	t.Logf("Copy(缺失源) error = %v", err)
+	if !errors.Is(err, storage.ErrObjectNotFound) {
+		t.Fatalf("期望 ErrObjectNotFound，实际 %v", err)
 	}
 }

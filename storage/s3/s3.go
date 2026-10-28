@@ -30,10 +30,15 @@ type Config struct {
 	Region          string       `json:"region" mapstructure:"region"`                   // 为空时回退 us-east-1；OSS 的 oss- 前缀会被去掉
 	AccessKeyID     string       `json:"accessKeyId" mapstructure:"accessKeyId"`         // 访问密钥 ID
 	SecretAccessKey string       `json:"secretAccessKey" mapstructure:"secretAccessKey"` // 访问密钥
+	SessionToken    string       `json:"sessionToken" mapstructure:"sessionToken"`       // STS 临时凭据的会话令牌，可空
 	UsePathStyle    bool         `json:"usePathStyle" mapstructure:"usePathStyle"`       // MinIO 与私有化部署常需要
 	Checksum        ChecksumMode `json:"checksum" mapstructure:"checksum"`               // 为空时使用 ChecksumWhenRequired
 	Bucket          string       `json:"bucket" mapstructure:"bucket"`                   // 可为空，仅在构造 storage.Service 时使用
 	HTTPClient      *http.Client `json:"-" mapstructure:"-"`                             // 为空时使用 SDK 默认
+
+	// Credentials 不为空时优先于静态密钥，用于对接 IAM Role / AssumeRole 等
+	// 凭据链；此时 AccessKeyID/SecretAccessKey/SessionToken 可以留空。
+	Credentials aws.CredentialsProvider `json:"-" mapstructure:"-"`
 }
 
 // Client 是 S3 客户端，实现 storage.Client。
@@ -45,8 +50,8 @@ type Client struct {
 // New 创建 S3 客户端。endpoint 与 region 在此完成归一化，整个客户端只构造
 // 一个 SDK 实例；桶前缀差异由 bucketEndpointResolver 在解析端点时处理。
 func New(config Config) (*Client, error) {
-	if config.AccessKeyID == "" || config.SecretAccessKey == "" {
-		return nil, fmt.Errorf("%w: access key 与 secret key 不能为空", storage.ErrInvalidArgument)
+	if config.Credentials == nil && (config.AccessKeyID == "" || config.SecretAccessKey == "") {
+		return nil, fmt.Errorf("%w: access key 与 secret key 不能为空（或注入 Credentials）", storage.ErrInvalidArgument)
 	}
 	switch config.Checksum {
 	case "":
@@ -58,9 +63,14 @@ func New(config Config) (*Client, error) {
 	config.Endpoint = normalizeEndpoint(config.Endpoint)
 	config.Region = normalizeRegion(config.Region)
 
+	credentialsProvider := config.Credentials
+	if credentialsProvider == nil {
+		credentialsProvider = credentials.NewStaticCredentialsProvider(
+			config.AccessKeyID, config.SecretAccessKey, config.SessionToken)
+	}
 	awsConfig := aws.Config{
 		Region:      config.Region,
-		Credentials: credentials.NewStaticCredentialsProvider(config.AccessKeyID, config.SecretAccessKey, ""),
+		Credentials: credentialsProvider,
 	}
 	if config.HTTPClient != nil {
 		awsConfig.HTTPClient = config.HTTPClient

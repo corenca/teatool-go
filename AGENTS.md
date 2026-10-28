@@ -30,11 +30,12 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   按每份数量、`SplitByParts` 按份数（余数靠前，与 `filesplit` 口径一致），
   参数非法返回 error，子切片共享底层数组但容量裁剪；`Dedupe` 保序去重并返回
   独立切片。
-- `storage/`：对象存储 SPI（19 个方法：判存、读写（含区间）、分片上传、磁盘上传下载、
-  列举（含目录视图）、批量/前缀删除、复制移动、预签名），零第三方依赖；
-  `storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、OBS、MinIO。
+- `storage/`：对象存储 SPI（20 个方法：判存、读写（含区间与末尾 N 字节）、分片上传、
+  磁盘上传下载、列举（含目录视图与流式 `Walk`）、批量/前缀删除、复制移动、预签名），
+  零第三方依赖；`storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、
+  OBS、MinIO。
   `storage/service.go` 提供单桶适配器 `Service`（`NewService(client, bucket)`），
-  18 个桶内方法 + `Bucket()`，`Copy`/`Move` 收窄为桶内；跨桶操作仍用 `Client`。
+  19 个桶内方法 + `Bucket()`，`Copy`/`Move` 收窄为桶内；跨桶操作仍用 `Client`。
   `storage/factory.go` 提供客户端工厂：`NewFactory(decoder)` 注入配置解码，
   `RegisterBackend(f, name, ctor)` 泛型注册（如 `storage.RegisterBackend(f, "s3", s3.New)`），
   `NewClient`/`NewService` 按名字构造；桶名由驱动实现可选接口 `Bucketer` 提供，
@@ -42,7 +43,11 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   tag，`Bucket` 可空且只在 `NewService` 时使用。
   跨厂商固定动作：批量删除一律带 `Content-MD5`（OSS/COS 强制）；region 自动去
   `oss-` 前缀；metadata 键统一小写；`Put` 超过 `PartSize`（默认 8MiB）自动转
-  multipart；预签名上传不约束 Content-Type（SDK 会剥离该头）。真实服务测试配置
+  multipart；预签名上传不约束 Content-Type（SDK 会剥离该头）。
+  `Writer` 契约是 `Write`/`Close`/`Abort`：`Close` 提交、`Abort` 放弃并回收分片；
+  `PartSize` 限 `[5MiB, 5GiB]`，分片并发默认 3；失败路径必须 Abort，不得提交截断
+  对象。`Copy` 超过 5GiB 走分片复制并保留源元信息；`Download` 用同目录临时文件
+  + rename 保证原子；`DeletePrefix` 逐页列举删除，不整批入内存。真实服务测试配置
   统一放各后端包内的 `<pkg>_test.json`（模板 `<pkg>_test.json.template` 入库，
   真实文件由 `storage/.gitignore` 忽略）；`storage/s3` 另有 `docs/config/`
   下的 `{s3,oss,cos,obs}.txt` 作为四厂商真实连接的遗留来源，不再新增。配置缺失

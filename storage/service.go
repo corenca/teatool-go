@@ -109,6 +109,11 @@ func (s *Service) ListAll(ctx context.Context, prefix string) ([]ObjectInfo, err
 	return s.client.ListAll(ctx, s.bucket, prefix)
 }
 
+// Walk 按 key 字典序流式遍历前缀下的对象。
+func (s *Service) Walk(ctx context.Context, prefix string, fn func(ObjectInfo) error) error {
+	return s.client.Walk(ctx, s.bucket, prefix, fn)
+}
+
 // ListDir 返回某一层级的目录视图：本层文件夹名与本层直接对象。
 func (s *Service) ListDir(ctx context.Context, prefix string) (DirInfo, error) {
 	return s.client.ListDir(ctx, s.bucket, prefix)

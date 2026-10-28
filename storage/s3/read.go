@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,12 +25,15 @@ func (c *Client) Stat(ctx context.Context, bucket, key string) (storage.ObjectIn
 		return storage.ObjectInfo{}, mapError(err)
 	}
 	return storage.ObjectInfo{
-		Key:          key,
-		Size:         aws.ToInt64(out.ContentLength),
-		LastModified: aws.ToTime(out.LastModified),
-		ETag:         trimETag(out.ETag),
-		ContentType:  aws.ToString(out.ContentType),
-		Metadata:     lowerMetadata(out.Metadata),
+		Key:                key,
+		Size:               aws.ToInt64(out.ContentLength),
+		LastModified:       aws.ToTime(out.LastModified),
+		ETag:               trimETag(out.ETag),
+		ContentType:        aws.ToString(out.ContentType),
+		ContentDisposition: aws.ToString(out.ContentDisposition),
+		CacheControl:       aws.ToString(out.CacheControl),
+		StorageClass:       string(out.StorageClass),
+		Metadata:           lowerMetadata(out.Metadata),
 	}, nil
 }
 
@@ -62,16 +66,27 @@ func (c *Client) Get(ctx context.Context, bucket, key string, opts storage.Reade
 
 	out, err := c.sdk.GetObject(ctx, input)
 	if err != nil {
+		if opts.Range != nil && errors.Is(mapError(err), storage.ErrInvalidRange) {
+			// 契约要求越界宽容：起始位置不小于对象大小时返回空流。
+			info, statErr := c.Stat(ctx, bucket, key)
+			if statErr != nil {
+				return nil, statErr
+			}
+			return &storage.Reader{ReadCloser: io.NopCloser(bytes.NewReader(nil)), Info: info}, nil
+		}
 		return nil, mapError(err)
 	}
 
 	info := storage.ObjectInfo{
-		Key:          key,
-		Size:         aws.ToInt64(out.ContentLength),
-		LastModified: aws.ToTime(out.LastModified),
-		ETag:         trimETag(out.ETag),
-		ContentType:  aws.ToString(out.ContentType),
-		Metadata:     lowerMetadata(out.Metadata),
+		Key:                key,
+		Size:               aws.ToInt64(out.ContentLength),
+		LastModified:       aws.ToTime(out.LastModified),
+		ETag:               trimETag(out.ETag),
+		ContentType:        aws.ToString(out.ContentType),
+		ContentDisposition: aws.ToString(out.ContentDisposition),
+		CacheControl:       aws.ToString(out.CacheControl),
+		StorageClass:       string(out.StorageClass),
+		Metadata:           lowerMetadata(out.Metadata),
 	}
 	if total, ok := contentRangeTotal(aws.ToString(out.ContentRange)); ok {
 		info.Size = total
@@ -89,9 +104,16 @@ func (c *Client) GetBytes(ctx context.Context, bucket, key string, opts storage.
 	return io.ReadAll(reader)
 }
 
-// rangeHeader 把前闭后开区间转成 HTTP Range 头；End < 0 表示到对象结尾。
+// rangeHeader 把前闭后开区间转成 HTTP Range 头；End < 0 表示到对象结尾，
+// Start < 0 表示对象末尾 |Start| 字节。
 func rangeHeader(r storage.ByteRange) (string, error) {
-	if r.Start < 0 || (r.End >= 0 && r.End <= r.Start) {
+	if r.Start < 0 {
+		if r.End > 0 {
+			return "", fmt.Errorf("%w: 非法字节区间 [%d, %d)", storage.ErrInvalidArgument, r.Start, r.End)
+		}
+		return fmt.Sprintf("bytes=-%d", -r.Start), nil
+	}
+	if r.End >= 0 && r.End <= r.Start {
 		return "", fmt.Errorf("%w: 非法字节区间 [%d, %d)", storage.ErrInvalidArgument, r.Start, r.End)
 	}
 	if r.End < 0 {
