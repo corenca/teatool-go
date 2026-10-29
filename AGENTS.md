@@ -36,11 +36,13 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   OBS、MinIO。
   `storage/service.go` 提供单桶适配器 `Service`（`NewService(client, bucket)`），
   19 个桶内方法 + `Bucket()`，`Copy`/`Move` 收窄为桶内；跨桶操作仍用 `Client`。
-  `storage/factory.go` 提供客户端工厂：`NewFactory(decoder)` 注入配置解码，
-  `RegisterBackend(f, name, ctor)` 泛型注册（如 `storage.RegisterBackend(f, "s3", s3.New)`），
-  `NewClient`/`NewService` 按名字构造；桶名由驱动实现可选接口 `Bucketer` 提供，
-  未注册的后端返回 `ErrBackendNotFound`。`s3.Config` 字段用小驼峰 `mapstructure`
-  tag，`Bucket` 可空且只在 `NewService` 时使用。
+  **不提供工厂或全局注册中心**：`s3` 是唯一实现，多实例装配由业务方完成——
+  按配置逐实例 `s3.New(s3.Config)`，需要单桶视图再 `storage.NewService(client, bucket)`，
+  自己维护 `map[实例名]Client` / `map[实例名]*Service`。将来真出现非 S3 协议的独立
+  实现、且需要运行时选实现时，再按 `database/sql` 的驱动注册模式引入。
+  `s3.Config` 每个字段带一致的 `json` / `yaml` / `toml` / `mapstructure` 小驼峰 tag
+  （`HTTPClient`、`Credentials` 为 `-`），JSON、YAML、TOML 文件都能直接解码；
+  `Bucket` 可空，库内不消费，业务方据此决定是否构造 `Service`。
   跨厂商固定动作：批量删除一律带 `Content-MD5`（OSS/COS 强制）；region 自动去
   `oss-` 前缀；metadata 键统一小写；`Put` 超过 `PartSize`（默认 8MiB）自动转
   multipart；预签名上传不约束 Content-Type（SDK 会剥离该头）。

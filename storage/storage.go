@@ -1,9 +1,9 @@
-// Package storage 定义对象存储的统一操作契约，并提供按名字构造客户端的工厂。
+// Package storage 定义对象存储的统一操作契约。
 //
-// 本包只包含契约、工厂与错误哨兵，不依赖任何厂商 SDK 或配置库：配置解码器由
-// 调用方注入（见 NewFactory），存储实现见 storage/s3。同一份实现覆盖 AWS S3
-// 以及 OSS、COS、OBS、MinIO 等 S3 兼容端点，厂商差异（endpoint、region、
-// 签名细节）由实现内部消化。
+// 本包只包含契约、错误哨兵与单桶适配器，不依赖任何厂商 SDK 或配置库；存储实现见
+// storage/s3。同一份实现覆盖 AWS S3 以及 OSS、COS、OBS、MinIO 等 S3 兼容端点，
+// 厂商差异（endpoint、region、签名细节）由实现内部消化。多实例的装配属于调用方：
+// 用 s3.New 逐个构造客户端，需要单桶视图时再套 storage.NewService。
 package storage
 
 import (

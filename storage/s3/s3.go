@@ -24,21 +24,23 @@ const (
 	ChecksumAlways ChecksumMode = "always"
 )
 
-// Config 是 S3 客户端配置。字段统一用小驼峰 tag，供配置库解码。
+// Config 是 S3 客户端配置。字段统一用小驼峰 tag，json / yaml / toml / mapstructure
+// 四种键名一致，json、yaml、toml 配置文件与 viper、koanf 这类库都能直接解码。
+// 只能代码注入的 HTTPClient 与 Credentials 标 "-"，不会从配置里读取。
 type Config struct {
-	Endpoint        string       `json:"endpoint" mapstructure:"endpoint"`               // 为空时使用 AWS 默认端点；可带桶前缀（COS 常见形态）
-	Region          string       `json:"region" mapstructure:"region"`                   // 为空时回退 us-east-1；OSS 的 oss- 前缀会被去掉
-	AccessKeyID     string       `json:"accessKeyId" mapstructure:"accessKeyId"`         // 访问密钥 ID
-	SecretAccessKey string       `json:"secretAccessKey" mapstructure:"secretAccessKey"` // 访问密钥
-	SessionToken    string       `json:"sessionToken" mapstructure:"sessionToken"`       // STS 临时凭据的会话令牌，可空
-	UsePathStyle    bool         `json:"usePathStyle" mapstructure:"usePathStyle"`       // MinIO 与私有化部署常需要
-	Checksum        ChecksumMode `json:"checksum" mapstructure:"checksum"`               // 为空时使用 ChecksumWhenRequired
-	Bucket          string       `json:"bucket" mapstructure:"bucket"`                   // 可为空，仅在构造 storage.Service 时使用
-	HTTPClient      *http.Client `json:"-" mapstructure:"-"`                             // 为空时使用 SDK 默认
+	Endpoint        string       `json:"endpoint" yaml:"endpoint" toml:"endpoint" mapstructure:"endpoint"`                             // 为空时使用 AWS 默认端点；可带桶前缀（COS 常见形态）
+	Region          string       `json:"region" yaml:"region" toml:"region" mapstructure:"region"`                                     // 为空时回退 us-east-1；OSS 的 oss- 前缀会被去掉
+	AccessKeyID     string       `json:"accessKeyId" yaml:"accessKeyId" toml:"accessKeyId" mapstructure:"accessKeyId"`                 // 访问密钥 ID
+	SecretAccessKey string       `json:"secretAccessKey" yaml:"secretAccessKey" toml:"secretAccessKey" mapstructure:"secretAccessKey"` // 访问密钥
+	SessionToken    string       `json:"sessionToken" yaml:"sessionToken" toml:"sessionToken" mapstructure:"sessionToken"`             // STS 临时凭据的会话令牌，可空
+	UsePathStyle    bool         `json:"usePathStyle" yaml:"usePathStyle" toml:"usePathStyle" mapstructure:"usePathStyle"`             // MinIO 与私有化部署常需要
+	Checksum        ChecksumMode `json:"checksum" yaml:"checksum" toml:"checksum" mapstructure:"checksum"`                             // 为空时使用 ChecksumWhenRequired
+	Bucket          string       `json:"bucket" yaml:"bucket" toml:"bucket" mapstructure:"bucket"`                                     // 可为空，仅在构造 storage.Service 时使用
+	HTTPClient      *http.Client `json:"-" yaml:"-" toml:"-" mapstructure:"-"`                                                         // 为空时使用 SDK 默认
 
 	// Credentials 不为空时优先于静态密钥，用于对接 IAM Role / AssumeRole 等
 	// 凭据链；此时 AccessKeyID/SecretAccessKey/SessionToken 可以留空。
-	Credentials aws.CredentialsProvider `json:"-" mapstructure:"-"`
+	Credentials aws.CredentialsProvider `json:"-" yaml:"-" toml:"-" mapstructure:"-"`
 }
 
 // Client 是 S3 客户端，实现 storage.Client。
@@ -93,12 +95,5 @@ func New(config Config) (*Client, error) {
 	return &Client{config: config, sdk: sdkClient}, nil
 }
 
-// 编译期断言：S3 客户端完整实现契约，并向工厂提供配置里的桶名。
-var (
-	_ storage.Client   = (*Client)(nil)
-	_ storage.Bucketer = (*Client)(nil)
-)
-
-// Bucket 返回配置里的桶名，供 storage 工厂构造单桶 Service。Client 自身的
-// 操作仍按调用传桶；桶名为空表示未配置。
-func (c *Client) Bucket() string { return c.config.Bucket }
+// 编译期断言：S3 客户端完整实现契约。
+var _ storage.Client = (*Client)(nil)

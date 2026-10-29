@@ -31,47 +31,31 @@ func TestNewRejectsMissingCredentials(t *testing.T) {
 	}
 }
 
-// TestConfigMapstructureTags 固定配置结构体的解码契约：每个字段都必须有
-// mapstructure tag，且不再保留没有解码路径的 toml tag。
-func TestConfigMapstructureTags(t *testing.T) {
+// TestConfigTags 固定配置结构体的解码契约：每个字段都带 json/yaml/toml/
+// mapstructure 四种 tag，键名一致；HTTPClient、Credentials 这类只能代码注入的
+// 字段统一标 "-"。
+func TestConfigTags(t *testing.T) {
 	typ := reflect.TypeFor[s3.Config]()
 	for field := range typ.Fields() {
-		tag, ok := field.Tag.Lookup("mapstructure")
-		if !ok || tag == "" {
+		want, ok := field.Tag.Lookup("mapstructure")
+		if !ok || want == "" {
 			t.Errorf("字段 %s 缺少 mapstructure tag", field.Name)
 			continue
 		}
-		if _, hasToml := field.Tag.Lookup("toml"); hasToml {
-			t.Errorf("字段 %s 仍带 toml tag（仓库没有 TOML 解码路径）", field.Name)
+		for _, name := range []string{"json", "yaml", "toml"} {
+			got, ok := field.Tag.Lookup(name)
+			if !ok {
+				t.Errorf("字段 %s 缺少 %s tag", field.Name, name)
+				continue
+			}
+			if got != want {
+				t.Errorf("字段 %s 的 %s tag = %q，期望与 mapstructure 一致 %q", field.Name, name, got, want)
+			}
 		}
-		t.Logf("%s -> mapstructure:%q", field.Name, tag)
-	}
-}
-
-// TestClientBucket 校验客户端原样保留配置里的桶名，且不因桶为空而拒绝构造。
-func TestClientBucket(t *testing.T) {
-	cases := []struct {
-		name   string
-		bucket string
-	}{
-		{"有桶", "demo"},
-		{"空桶", ""},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			client, err := s3.New(s3.Config{
-				AccessKeyID:     "ak",
-				SecretAccessKey: "sk",
-				Bucket:          tc.bucket,
-			})
-			if err != nil {
-				t.Fatalf("New() error = %v", err)
-			}
-			t.Logf("配置 bucket=%q，Client.Bucket() = %q", tc.bucket, client.Bucket())
-			if got := client.Bucket(); got != tc.bucket {
-				t.Fatalf("Bucket() = %q，期望 %q", got, tc.bucket)
-			}
-		})
+		jsonTag, _ := field.Tag.Lookup("json")
+		yamlTag, _ := field.Tag.Lookup("yaml")
+		tomlTag, _ := field.Tag.Lookup("toml")
+		t.Logf("%s -> json:%q yaml:%q toml:%q mapstructure:%q",
+			field.Name, jsonTag, yamlTag, tomlTag, want)
 	}
 }

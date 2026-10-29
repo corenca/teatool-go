@@ -3,31 +3,206 @@
 对象存储的统一操作契约与 S3 实现。同一份代码覆盖 AWS S3 与 OSS、COS、OBS、MinIO
 等 S3 兼容端点；`storage` 包零第三方依赖，`storage/s3` 是唯一的厂商实现。
 
-## 快速开始
+## 使用方式
+
+### 直接用 Client
+
+`Client` 的每个方法都带 `bucket` 参数，适合多桶与跨桶场景。
 
 ```go
+package main
+
 import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
 	"github.com/corenca/teatool-go/storage"
 	"github.com/corenca/teatool-go/storage/s3"
 )
 
-client, err := s3.New(s3.Config{
-	Endpoint:        "https://oss-cn-hangzhou.aliyuncs.com",
-	Region:          "cn-hangzhou",
-	AccessKeyID:     os.Getenv("OSS_AK"),
-	SecretAccessKey: os.Getenv("OSS_SK"),
-})
-if err != nil {
-	return err
-}
+func main() {
+	client, err := s3.New(s3.Config{
+		Endpoint:        "https://oss-cn-hangzhou.aliyuncs.com",
+		Region:          "cn-hangzhou",
+		AccessKeyID:     os.Getenv("OSS_AK"),
+		SecretAccessKey: os.Getenv("OSS_SK"),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
-err = client.PutBytes(ctx, "bucket", "a/b.txt", []byte("hello"), storage.WriterOptions{
-	ContentType: "text/plain",
-})
+	ctx := context.Background()
+	// Client 的每个方法都要传 bucket，多桶与跨桶操作直接用它
+	if err := client.PutBytes(ctx, "demo", "a/b.txt", []byte("hello"),
+		storage.WriterOptions{ContentType: "text/plain"}); err != nil {
+		log.Fatal(err)
+	}
+	if err := client.Copy(ctx, "demo", "a/b.txt", "backup", "a/b.txt"); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("demo/a/b.txt 已写入并复制到 backup/a/b.txt")
+}
 ```
 
-只需要操作单个桶时，用 `storage.NewService(client, bucket)` 固定桶名，方法签名会
-去掉 `bucket` 参数。跨桶操作直接使用 `Client`（构造 `Service` 前保留引用即可）。
+### 直接用 Service
+
+只操作一个桶时，用 `storage.NewService(client, bucket)` 绑定桶名，方法签名会去掉
+`bucket` 参数，其余语义与 `Client` 完全一致。跨桶操作仍用 `Client`（构造 `Service`
+前保留引用即可）。
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/corenca/teatool-go/storage"
+	"github.com/corenca/teatool-go/storage/s3"
+)
+
+func main() {
+	client, err := s3.New(s3.Config{
+		Endpoint:        "https://oss-cn-hangzhou.aliyuncs.com",
+		Region:          "cn-hangzhou",
+		AccessKeyID:     os.Getenv("OSS_AK"),
+		SecretAccessKey: os.Getenv("OSS_SK"),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Service 绑定单个桶，方法签名里不再有 bucket 参数
+	service, err := storage.NewService(client, "demo")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if err := service.PutBytes(ctx, "a/b.txt", []byte("hello"),
+		storage.WriterOptions{ContentType: "text/plain"}); err != nil {
+		log.Fatal(err)
+	}
+	info, err := service.Stat(ctx, "a/b.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%s 中的 %s：%d 字节\n", service.Bucket(), info.Key, info.Size)
+}
+```
+
+### 从配置文件加载
+
+多实例（多桶、多厂商）通常写在配置文件里。装配由业务方在启动时完成：读出 `storage`
+段，为每个实例 `s3.New` 一个客户端，需要单桶视图的再套 `storage.NewService`，最后
+按名字取用。库不提供全局注册中心或工厂——`s3` 是唯一的实现，装配属于业务方。
+
+`config.yaml`：
+
+```yaml
+storage:
+  files:                    # 实例名，业务方自己的 map key
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com
+    region: cn-hangzhou
+    accessKeyId: your-ak
+    secretAccessKey: your-sk
+    bucket: demo
+  backup:
+    endpoint: https://cos.ap-guangzhou.myqcloud.com
+    region: ap-guangzhou
+    accessKeyId: your-ak
+    secretAccessKey: your-sk
+    bucket: backup
+```
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/go-viper/mapstructure/v2"
+	"github.com/spf13/viper"
+
+	"github.com/corenca/teatool-go/storage"
+	"github.com/corenca/teatool-go/storage/s3"
+)
+
+// store 是业务方自己的实例表：实例名 -> 客户端与单桶 Service。
+type store struct {
+	clients  map[string]storage.Client
+	services map[string]*storage.Service
+}
+
+func main() {
+	v := viper.New()
+	v.SetConfigFile("config.yaml")
+	if err := v.ReadInConfig(); err != nil {
+		log.Fatalf("读取配置失败: %v", err)
+	}
+	// 密钥建议用 v.BindEnv("storage.files.secretAccessKey", "OSS_SK") 注入
+
+	raws := v.GetStringMap("storage")
+	if len(raws) == 0 {
+		log.Fatal("配置缺少 storage 段")
+	}
+
+	st := &store{
+		clients:  make(map[string]storage.Client, len(raws)),
+		services: make(map[string]*storage.Service, len(raws)),
+	}
+	for name, value := range raws {
+		var config s3.Config
+		if err := mapstructure.Decode(value, &config); err != nil {
+			log.Fatalf("解析 storage.%s: %v", name, err)
+		}
+		client, err := s3.New(config)
+		if err != nil {
+			log.Fatalf("初始化 storage.%s: %v", name, err)
+		}
+		st.clients[name] = client
+		// bucket 非空才有单桶视图；示例假设配置里都填了
+		if config.Bucket != "" {
+			service, err := storage.NewService(client, config.Bucket)
+			if err != nil {
+				log.Fatalf("初始化 storage.%s 的 Service: %v", name, err)
+			}
+			st.services[name] = service
+		}
+	}
+	fmt.Printf("已初始化 %d 个客户端\n", len(st.clients))
+
+	// 用起来和前面一致：单桶走 Service，跨桶走 Client
+	ctx := context.Background()
+	files := st.services["files"]
+	if err := files.PutBytes(ctx, "a/hello.txt", []byte("hello"),
+		storage.WriterOptions{ContentType: "text/plain"}); err != nil {
+		log.Fatal(err)
+	}
+	if err := st.clients["files"].Copy(ctx, files.Bucket(), "a/hello.txt",
+		st.services["backup"].Bucket(), "a/copy.txt"); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+要点：
+
+- 每个实例都是 `s3.New(s3.Config)`：OSS/COS/OBS/MinIO 用同一份实现，只改
+  `endpoint` / `region`（MinIO 与私有化部署再打开 `usePathStyle`）。
+- `bucket` 非空的实例顺手 `storage.NewService`，单桶操作就不必反复传桶名；
+  跨桶操作保留 `clients[name]`。
+- viper 会把键名小写化（`accesskeyid`），`mapstructure` 匹配大小写不敏感，
+  `s3.Config` 的小驼峰 tag 直接可用。
+- 装配代码留在业务方：密钥来源、失败是中断启动还是降级、是否预热，都由业务决定。
+- 将来若出现非 S3 协议的独立实现、且需要运行时按配置选实现，再按 `database/sql`
+  的驱动模式引入注册中心；现在引入只会多一层没有多实现的抽象。
 
 ## 契约语义
 
@@ -68,30 +243,17 @@ err = client.PutBytes(ctx, "bucket", "a/b.txt", []byte("hello"), storage.WriterO
 | `Credentials` | 注入凭据链（IAM Role / AssumeRole），优先于静态凭据 |
 | `UsePathStyle` | MinIO 与私有化部署通常需要 |
 | `Checksum` | `when_required`（默认）或 `always`，后者要求端点支持 `aws-chunked` |
-| `Bucket` | 可为空，仅在构造 `storage.Service` 时使用 |
+| `Bucket` | 可为空；业务方据此调 `storage.NewService` 绑定单桶 |
 | `HTTPClient` | 自定义超时、代理、TLS 或埋点传输层 |
 
-配置可用任一配置库解码；字段同时带 `json` 与小驼峰 `mapstructure` tag。
+配置可用任一配置库解码：`s3.Config` 每个字段都带 `json` / `yaml` / `toml` /
+`mapstructure` 四种 tag，键名统一为小驼峰（`accessKeyId`、`usePathStyle`），JSON、
+YAML、TOML 文件与 viper、koanf 这类库都能直接解码。`HTTPClient` 与 `Credentials`
+标 `-`，只能代码注入。
 
-### 配置驱动的工厂
-
-```go
-factory, err := storage.NewFactory(func(raw map[string]any, target any) error {
-	return mapstructure.Decode(raw, target) // 也可用 viper.Sub(name).Unmarshal(target)
-})
-if err != nil {
-	return err
-}
-if err := storage.RegisterBackend(factory, "s3", s3.New); err != nil {
-	return err
-}
-
-client, err := factory.NewClient("s3", rawConfig)   // Client
-service, err := factory.NewService("s3", rawConfig) // 绑定 Config.Bucket 的 Service
-```
-
-同一驱动可注册成多个名字（如 `s3`、`s3Backup`）；未注册的名字返回
-`ErrBackendNotFound`。
+装配方式：`s3.New(config)` 直接构造客户端，`storage.NewService(client, bucket)`
+把客户端绑到单个桶。库不提供全局注册中心或按名字构造的工厂，多实例的装配由业务方
+在启动时完成（见上文「从配置文件加载」）。
 
 ## 厂商差异
 
