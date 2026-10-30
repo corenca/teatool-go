@@ -1,7 +1,8 @@
 # teatool-go
 
 Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.2）。作者 Corenca。
-核心包零第三方依赖；唯一的例外是 `storage/s3`（引入 aws-sdk-go-v2）。
+核心包零第三方依赖；例外是 `storage/s3`（aws-sdk-go-v2）与 `gm`
+（emmansun/gmsm）。
 无 CI、Makefile、linter 配置，不要假设它们存在。
 
 ## 项目现状
@@ -30,6 +31,16 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   按每份数量、`SplitByParts` 按份数（余数靠前，与 `filesplit` 口径一致），
   参数非法返回 error，子切片共享底层数组但容量裁剪；`Dedupe` 保序去重并返回
   独立切片。
+- `gm/`：国密 SM2/SM3/SM4 加解密。两类对称密文共用文本信封
+  `v1.<alg>.<kid>.<base64url(payload)>`：SM4-GCM 用于后端闭环的配置项（16 字节
+  key），SM4-CBC + PKCS#7 + HMAC-SM3 用于前后端报文（32 字节 key，前 16 加密、
+  后 16 做 HMAC，Encrypt-then-MAC）。SM2 默认 C1C3C2 + 未压缩点（带 04），可用
+  `SM2Options` 显式切 C1C2C3 / ASN.1；私钥 PKCS#8 或 64 位 hex、公钥 PKIX 或 `04||X||Y` hex。
+  `ParseSM4KeyHex` 负责把环境变量/KMS 返回的 hex 解析成密钥并校验长度。
+  解密失败统一 `ErrDecrypt`，不返回部分明文。前端以 `sm-crypto >= 0.5.0` 为准：
+  04 前缀由前端补，SM4 必须显式 `mode:'cbc'`，固定向量在 `interop_test.go`。
+  SM1 不做（算法未公开，只能依赖硬件密码设备）。报文加密只针对内存小数据，
+  不做流式/大文件。
 - `storage/`：对象存储 SPI（20 个方法：判存、读写（含区间与末尾 N 字节）、分片上传、
   磁盘上传下载、列举（含目录视图与流式 `Walk`）、批量/前缀删除、复制移动、预签名），
   零第三方依赖；`storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、
@@ -103,6 +114,14 @@ gofmt -l .                     # 提交前检查；有输出则 gofmt -w .
   只要服务可用就必须走真实 API，不用假客户端替代。
 - `docs/config/<vendor>.txt` 的 `use_path_style: "true"` 会被 `loadLiveConfig`
   解析：本地用 RustFS/MinIO 验证 s3 槽位时必须打开，否则虚拟托管寻址会失败。
+
+## 文档约定
+
+- 每个包下的 `README.md` 是**用户使用文档**：包含包的用途、可运行的 demo、经典
+  场景、每个参数的含义与常见错误；涉及密钥时写明环境变量/KMS 的注入方式、hex
+  解码与长度校验。不写内部测试基础设施和维护者视角的内容。
+- 所有对外导出的 API 必须有 Go doc 注释，详细说明用途、每个参数的含义、返回值
+  与错误（尤其是安全约束、副作用和并发安全性），不能只写一句摘要。
 
 ## Git 约定
 
