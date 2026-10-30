@@ -1,7 +1,8 @@
 # teatool-go
 
 Go 业务工具库（module `github.com/corenca/teatool-go`，要求 Go 1.27.2）。核心包零
-第三方依赖；例外是 `storage/s3`（aws-sdk-go-v2）与 `gm`（emmansun/gmsm）。
+第三方依赖；例外是 `storage/s3`（aws-sdk-go-v2）、`gm`（emmansun/gmsm）与
+`excel`（xuri/excelize）。
 每个模块的用法、参数与常见错误见各自 README。
 
 ## 功能
@@ -15,5 +16,6 @@ Go 业务工具库（module `github.com/corenca/teatool-go`，要求 Go 1.27.2�
 | `fsutil` | 判存、建父目录、上传文件名清洗与安全拼接、单文件复制/移动、目录文件遍历 | [fsutil/README.md](fsutil/README.md) |
 | `masking` | 字段与自由文本脱敏：十种内置业务类型、可注册自定义类型与自动识别规则 | [masking/README.md](masking/README.md) |
 | `gm` | 国密 SM2 / SM3 / SM4：配置项加密（SM4-GCM）、前后端报文加密（SM4-CBC + HMAC-SM3）、SM2 短数据加密、摘要与 HMAC | [gm/README.md](gm/README.md) |
+| `excel` | 声明式 xlsx 读写：按列声明取值与校验、无表头按位置对应、结构体映射、流式读写、行级错误行号 | [excel/README.md](excel/README.md) |
 | `storage` | 对象存储统一契约：读写、区间与末尾 N 字节、分片上传、磁盘上传下载、列举与目录视图、批量删除、复制移动、预签名 | [storage/README.md](storage/README.md) |
 | `storage/s3` | 上述契约的 S3 实现，同一份代码覆盖 AWS S3、OSS、COS、OBS、MinIO | [storage/README.md](storage/README.md) |

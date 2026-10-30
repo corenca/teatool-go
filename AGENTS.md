@@ -1,8 +1,8 @@
 # teatool-go
 
 Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.2）。作者 Corenca。
-核心包零第三方依赖；例外是 `storage/s3`（aws-sdk-go-v2）与 `gm`
-（emmansun/gmsm）。
+核心包零第三方依赖；例外是 `storage/s3`（aws-sdk-go-v2）、`gm`
+（emmansun/gmsm）与 `excel`（xuri/excelize）。
 无 CI、Makefile、linter 配置，不要假设它们存在。
 
 ## 项目现状
@@ -41,6 +41,15 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   04 前缀由前端补，SM4 必须显式 `mode:'cbc'`，固定向量在 `interop_test.go`。
   SM1 不做（算法未公开，只能依赖硬件密码设备）。报文加密只针对内存小数据，
   不做流式/大文件。
+- `excel/`：声明式 xlsx 读写（xlsx/xlsm/xltx/xltm，不支持 `.xls`/csv/加密文件）。
+  `Column{Header, Key, Type, Layout, Required, Width}` 是唯一列声明，map 层返回
+  `[]map[string]string`，结构体层用 `ReadInto[T]`/`WriteFrom[T]`。读取严格按声明：
+  多余列忽略，缺列报错；无表头模式声明列数必须等于文件实际列宽。值统一 string，
+  `Type` 只做校验与规范化，map 层的日期类型必须 `RawValues=true`（取序列号）；
+  结构体层 `time.Time` 先按序列号、失败再按 layout 解析，两种来源都能读。写出每行必须
+  包含全部声明 Key，缺一个报 `*RowError`（`ErrMissingKey`）；以 `=` 开头的值按文本
+  写。全量入口 `Read`/`Write` 与流式入口 `ReadEach`/`ReadEachFile`/`Writer` 共享同一套语义；行级
+  错误带 Excel 物理行号。文件只做 xlsx，扩展名与 ZIP 魔数双重校验。
 - `storage/`：对象存储 SPI（20 个方法：判存、读写（含区间与末尾 N 字节）、分片上传、
   磁盘上传下载、列举（含目录视图与流式 `Walk`）、批量/前缀删除、复制移动、预签名），
   零第三方依赖；`storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、
