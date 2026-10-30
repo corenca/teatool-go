@@ -14,7 +14,7 @@ import (
 	"github.com/corenca/teatool-go/storage"
 )
 
-// Upload 把本地文件上传为对象。读取失败时放弃上传，不会提交截断的对象。
+// Upload 上传中途读取失败时调用 Abort，回收已上传的分片。
 func (c *Client) Upload(ctx context.Context, bucket, key, path string, opts storage.WriterOptions) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -33,9 +33,8 @@ func (c *Client) Upload(ctx context.Context, bucket, key, path string, opts stor
 	return writer.Close()
 }
 
-// Download 把对象下载到本地文件；父目录不存在时创建，已存在则覆盖。
-//
-// 先写同目录临时文件再 rename：中途失败不会破坏已有文件，也不会留下半个文件。
+// Download 先写同目录临时文件再 rename：中途失败不会破坏已有文件，也不会留下半个
+// 文件。
 func (c *Client) Download(ctx context.Context, bucket, key, path string, opts storage.ReaderOptions) error {
 	reader, err := c.Get(ctx, bucket, key, opts)
 	if err != nil {

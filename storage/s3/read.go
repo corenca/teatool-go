@@ -15,7 +15,7 @@ import (
 	"github.com/corenca/teatool-go/storage"
 )
 
-// Stat 返回对象元信息（head 语义）。
+// Stat 是 HEAD 请求，并把元数据键统一转成小写（跨厂商一致）。
 func (c *Client) Stat(ctx context.Context, bucket, key string) (storage.ObjectInfo, error) {
 	out, err := c.sdk.HeadObject(ctx, &awss3.HeadObjectInput{
 		Bucket: aws.String(bucket),
@@ -37,7 +37,7 @@ func (c *Client) Stat(ctx context.Context, bucket, key string) (storage.ObjectIn
 	}, nil
 }
 
-// Exists 判断对象是否存在；权限等错误原样返回。
+// Exists 复用 Stat（HEAD），只有 404 视为不存在。
 func (c *Client) Exists(ctx context.Context, bucket, key string) (bool, error) {
 	_, err := c.Stat(ctx, bucket, key)
 	switch {
@@ -50,7 +50,8 @@ func (c *Client) Exists(ctx context.Context, bucket, key string) (bool, error) {
 	}
 }
 
-// Get 返回对象内容流；区间请求时 Info.Size 为对象总大小。
+// Get 用 Range 请求头实现区间读取；响应带 Content-Range 时用其中的总大小覆盖
+// Info.Size。
 func (c *Client) Get(ctx context.Context, bucket, key string, opts storage.ReaderOptions) (*storage.Reader, error) {
 	input := &awss3.GetObjectInput{
 		Bucket: aws.String(bucket),
@@ -94,7 +95,7 @@ func (c *Client) Get(ctx context.Context, bucket, key string, opts storage.Reade
 	return &storage.Reader{ReadCloser: out.Body, Info: info}, nil
 }
 
-// GetBytes 把对象内容读入内存。
+// GetBytes 在 Get 之上 io.ReadAll，读完即 Close。
 func (c *Client) GetBytes(ctx context.Context, bucket, key string, opts storage.ReaderOptions) ([]byte, error) {
 	reader, err := c.Get(ctx, bucket, key, opts)
 	if err != nil {

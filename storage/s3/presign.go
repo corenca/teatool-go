@@ -12,7 +12,8 @@ import (
 	"github.com/corenca/teatool-go/storage"
 )
 
-// PresignGet 生成下载预签名 URL；FileName 通过响应头覆写下载文件名。
+// PresignGet 用 `response-content-disposition` 实现 FileName（RFC 6266，中文名
+// 同时带 ASCII 回退），签名固化在 URL 查询参数里，因此 Headers 为空。
 func (c *Client) PresignGet(ctx context.Context, bucket, key string, opts storage.PresignOptions) (storage.PresignedURL, error) {
 	if err := validatePresign(opts, http.MethodGet); err != nil {
 		return storage.PresignedURL{}, err
@@ -33,10 +34,8 @@ func (c *Client) PresignGet(ctx context.Context, bucket, key string, opts storag
 	return storage.PresignedURL{URL: presigned.URL}, nil
 }
 
-// PresignPut 生成上传预签名 URL。
-//
-// 注意：SDK 的 PresignPutObject 会剥离 Content-Type 请求头，故预签名上传无法
-// 约束对象的 Content-Type，对象类型由服务端或上传请求自行决定。
+// PresignPut 生成的 URL 无法约束 Content-Type：SDK 的 PresignPutObject 会剥离该
+// 请求头，对象类型由上传请求或服务端默认值决定。
 func (c *Client) PresignPut(ctx context.Context, bucket, key string, opts storage.PresignOptions) (storage.PresignedURL, error) {
 	if err := validatePresign(opts, http.MethodPut); err != nil {
 		return storage.PresignedURL{}, err

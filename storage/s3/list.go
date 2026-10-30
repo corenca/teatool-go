@@ -13,7 +13,7 @@ import (
 	"github.com/corenca/teatool-go/storage"
 )
 
-// List 返回一页列举结果；游标为 continuation-token 的不透明编码。
+// List 的游标是 continuation-token 的 base64url 编码，对调用方不透明。
 func (c *Client) List(ctx context.Context, bucket string, opts storage.ListOptions) (storage.ListPage, error) {
 	pageSize := opts.MaxKeys
 	if pageSize <= 0 {
@@ -68,7 +68,7 @@ func (c *Client) List(ctx context.Context, bucket string, opts storage.ListOptio
 	return page, nil
 }
 
-// ListAll 自动翻页，返回前缀下的全部对象。
+// ListAll 逐页调用 List 并累积结果。
 func (c *Client) ListAll(ctx context.Context, bucket, prefix string) ([]storage.ObjectInfo, error) {
 	var objects []storage.ObjectInfo
 	err := c.Walk(ctx, bucket, prefix, func(object storage.ObjectInfo) error {
@@ -81,7 +81,7 @@ func (c *Client) ListAll(ctx context.Context, bucket, prefix string) ([]storage.
 	return objects, nil
 }
 
-// Walk 按 key 字典序流式遍历前缀下的对象。
+// Walk 边翻页边回调，每页只保留一条列举结果。
 func (c *Client) Walk(ctx context.Context, bucket, prefix string, fn func(storage.ObjectInfo) error) error {
 	cursor := ""
 	for {
@@ -101,10 +101,8 @@ func (c *Client) Walk(ctx context.Context, bucket, prefix string, fn func(storag
 	}
 }
 
-// ListDir 返回某一层级的目录视图：Dirs 只含本层文件夹名。
-//
-// prefix 没有尾部 "/" 时自动补齐（"sql" 视同 "sql/"），避免整层目录被当成
-// 公共前缀而返回空视图；返回的 DirInfo.Prefix 是补齐后的值。
+// ListDir 用 delimiter="/" 实现单层目录视图；prefix 自动补齐尾斜杠，返回的
+// DirInfo.Prefix 是补齐后的值。
 func (c *Client) ListDir(ctx context.Context, bucket, prefix string) (storage.DirInfo, error) {
 	prefix = dirPrefix(prefix)
 	info := storage.DirInfo{Prefix: prefix}
@@ -132,7 +130,7 @@ func (c *Client) ListDir(ctx context.Context, bucket, prefix string) (storage.Di
 	}
 }
 
-// ListBuckets 列举当前凭据可见的桶名。
+// ListBuckets 直接转发 SDK 的 ListBuckets。
 func (c *Client) ListBuckets(ctx context.Context) ([]string, error) {
 	out, err := c.sdk.ListBuckets(ctx, &awss3.ListBucketsInput{})
 	if err != nil {

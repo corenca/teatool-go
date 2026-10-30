@@ -41,7 +41,9 @@ type writer struct {
 	done    bool // 已成功提交
 }
 
-// Write 追加数据；缓冲区放不下时派发分片。后台分片失败后返回该错误。
+// Write 先塞缓冲区，超过 PartSize 时派发分片；派发失败时 written 可能小于 len(p)
+// 并同时返回错误。后台分片的错误在下一次 Write 或 Close 时报告。Close 或 Abort
+// 之后再调用返回包装 ErrInvalidArgument 的错误。
 func (w *writer) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, fmt.Errorf("%w: 写入器已关闭", storage.ErrInvalidArgument)
@@ -111,7 +113,7 @@ func (w *writer) Close() error {
 	return w.complete()
 }
 
-// Abort 放弃本次写入：等待在途分片结束后回收未完成的分片上传。
+// Abort 置关闭标记后等待在途分片结束，再回收分片上传；重复调用返回首次结果。
 func (w *writer) Abort() error {
 	if w.closed {
 		return nil

@@ -12,21 +12,31 @@ import (
 )
 
 // SM2CiphertextOrder 是 SM2 密文的拼接顺序。
+//
+// 两种顺序只是 C1、C2、C3 三段的位置不同，并不影响算法安全性；跨系统互通时
+// 必须与对端一致，否则解密会得到乱码或直接失败（C3 校验不过）。
 type SM2CiphertextOrder int
 
 const (
 	// C1C3C2 是 GB/T 32918.4 与多数实现的默认顺序。
+	//
+	// 零值，不显式传 SM2Options 时就是它。新系统互通优先选这个。
 	C1C3C2 SM2CiphertextOrder = iota
 	// C1C2C3 是部分存量系统使用的顺序。
+	//
+	// 只用于对接改造困难的旧系统；新代码不要主动选它。
 	C1C2C3
 )
 
-// SM2Options 控制 SM2 密文的编码方式。零值等价于 C1C3C2 裸编码。
+// SM2Options 控制 SM2 密文的编码方式。零值等价于 C1C3C2 裸编码（未压缩点，带 04 前缀）。
 //
-// ASN1 为 true 时输出/接受 ASN.1 DER 结构，此时 Order 不参与编码。
+// ASN1 为 true 时输出/接受 ASN.1 DER 结构，此时 Order 不参与编码；需要与
+// Java BouncyCastle 默认输出等老实现对接时再用。
 type SM2Options struct {
+	// Order 是 C1、C2、C3 的拼接顺序，零值为 C1C3C2；ASN1 为 true 时忽略。
 	Order SM2CiphertextOrder
-	ASN1  bool
+	// ASN1 为 true 时使用 ASN.1 DER 编码，为 false 时使用裸字节拼接。
+	ASN1 bool
 }
 
 // GenerateSM2Key 生成一对 SM2 密钥。

@@ -32,14 +32,22 @@ import (
 	"unicode/utf8"
 )
 
-// RedactedMarker 是未知类型的固定输出，便于日志检索与告警规则匹配。
+// RedactedMarker 是 Mask 遇到未注册类型时的固定输出。
+//
+// 取值固定为 "[REDACTED]"，不含原值任何片段，便于日志检索与告警规则匹配。
+// 该常量属于 fail-closed 策略的一部分：类型拼写错误、配置漏项都会走到这里，
+// 调用方看到这串标记就应排查注册表，而不是把它当成脱敏结果。
 const RedactedMarker = "[REDACTED]"
 
-// 注册期错误。
+// 注册期错误。两个错误都由 Register 返回，调用方用 errors.Is 判断。
 var (
-	// ErrNilMaskFunc 表示注册的脱敏函数为 nil。
+	// ErrNilMaskFunc 表示传给 Register 的脱敏函数为 nil。
+	//
+	// 注册 nil 会让该类型的 Mask 在运行期 panic，因此在装配期就拒绝。
 	ErrNilMaskFunc = errors.New("masking: 脱敏函数为 nil")
-	// ErrInvalidType 表示注册的类型名为空。
+	// ErrInvalidType 表示传给 Register 的类型名为空字符串。
+	//
+	// 空类型名无法被 Mask 命中，只会让注册表出现不可达条目，因此直接拒绝。
 	ErrInvalidType = errors.New("masking: 类型名为空")
 )
 
@@ -49,27 +57,55 @@ var (
 // 不同场景使用不同格式（日志保留首尾、导出全遮蔽）。
 type Type string
 
-// 内置类型。对应的默认格式见 New 与下方各预置函数。
+// 内置类型。常量值是注册表的键，也是日志与配置里出现的字符串，改动等于破坏兼容。
+//
+// 其中带检测器的六种（phone、telephone、id_card、bank_card、email、ip）会被
+// MaskText 在自由文本中自动识别；name、address、password、secret 依赖业务语义，
+// 只能按类型名用 Mask 显式脱敏。默认格式由 New 装配，逐条见下方各预置函数。
 const (
-	// TypePhone 是手机号，默认保留前三后四。
+	// TypePhone 是手机号，键为 "phone"。
+	//
+	// MaskText 按大陆 11 位号段（1[3-9] 开头）识别，默认格式保留前三后四，
+	// 例如 "138****5678"。
 	TypePhone Type = "phone"
-	// TypeTelephone 是固定电话，默认保留前三后四。
+	// TypeTelephone 是固定电话，键为 "telephone"。
+	//
+	// MaskText 识别 0 开头的区号号码与 400 号码，默认格式保留前三后四。
 	TypeTelephone Type = "telephone"
-	// TypeIDCard 是居民身份证号，默认保留前六后四。
+	// TypeIDCard 是居民身份证号，键为 "id_card"。
+	//
+	// MaskText 识别 18 位（末位可为 X）与 15 位号码，默认格式保留前六后四，
+	// 例如 "110101********1234"。
 	TypeIDCard Type = "id_card"
-	// TypeBankCard 是银行卡号，默认保留前六后四。
+	// TypeBankCard 是银行卡号，键为 "bank_card"。
+	//
+	// MaskText 识别 13~19 位数字并用 Luhn 校验过滤伪号，默认格式保留前六后四。
 	TypeBankCard Type = "bank_card"
-	// TypeEmail 是电子邮箱，默认保留本地部分首字符与完整域名。
+	// TypeEmail 是电子邮箱，键为 "email"。
+	//
+	// MaskText 识别完整的 user@domain 形态，默认格式保留本地部分首字符与完整
+	// 域名，例如 "a****@example.com"。
 	TypeEmail Type = "email"
-	// TypeName 是姓名，默认保留首字符。
+	// TypeName 是姓名，键为 "name"，默认格式保留首字符，例如 "张*"。
+	//
+	// 姓名无法从自由文本中可靠识别，MaskText 不会处理它；请用 Mask 按字段脱敏。
 	TypeName Type = "name"
-	// TypeAddress 是地址，默认保留前六个字符。
+	// TypeAddress 是地址，键为 "address"，默认格式保留前六个字符。
+	//
+	// 地址同样依赖业务语义，MaskText 不识别。地址常以省市区开头，保留前六个
+	// 字符足以支撑人工核对，又不会暴露门牌号。
 	TypeAddress Type = "address"
-	// TypeIP 是 IP 地址，默认全遮蔽。
+	// TypeIP 是 IP 地址，键为 "ip"。
+	//
+	// MaskText 识别 IPv4 与常见 IPv6 写法（不含内嵌 IPv4），默认全遮蔽。
 	TypeIP Type = "ip"
-	// TypePassword 是密码，默认全遮蔽。
+	// TypePassword 是密码，键为 "password"，默认全遮蔽。
+	//
+	// 密码不应出现在任何日志里；这里的遮蔽只作为兜底，MaskText 不识别它。
 	TypePassword Type = "password"
-	// TypeSecret 是通用密文（令牌、密钥等），默认全遮蔽。
+	// TypeSecret 是通用密文（令牌、密钥、连接串口令等），键为 "secret"。
+	//
+	// 默认全遮蔽，用于那些没有专门类型、但一旦落盘就必须抹掉的字段。
 	TypeSecret Type = "secret"
 )
 
@@ -81,52 +117,53 @@ const (
 // 预置只提供最常用的保留位，业务需要不同格式时用 Keep 等工厂自行构造，或
 // 通过 Register 覆盖注册表中的同名类型。
 
-// Phone 返回手机号的默认脱敏函数，保留前三后四。
+// Phone 返回手机号的默认脱敏函数，保留前三后四，如 "138****5678"。
 func Phone() MaskFunc {
 	return Keep(3, 4)
 }
 
-// Telephone 返回固定电话的默认脱敏函数，保留前三后四。
+// Telephone 返回固定电话的默认脱敏函数，保留前三后四，如 "057******6666"。
 func Telephone() MaskFunc {
 	return Keep(3, 4)
 }
 
-// IDCard 返回居民身份证号的默认脱敏函数，保留前六后四。
+// IDCard 返回居民身份证号的默认脱敏函数，保留前六后四，如 "110101********1234"。
 func IDCard() MaskFunc {
 	return Keep(6, 4)
 }
 
-// BankCard 返回银行卡号的默认脱敏函数，保留前六后四。
+// BankCard 返回银行卡号的默认脱敏函数，保留前六后四，如 "622202******0000"。
 func BankCard() MaskFunc {
 	return Keep(6, 4)
 }
 
-// Email 返回电子邮箱的默认脱敏函数，保留本地部分首字符与完整域名。
+// Email 返回电子邮箱的默认脱敏函数，保留本地部分首字符与完整域名，如
+// "a****@example.com"。
 func Email() MaskFunc {
 	return EmailKeepLocal(1)
 }
 
-// Name 返回姓名的默认脱敏函数，保留首字符。
+// Name 返回姓名的默认脱敏函数，保留首字符，如 "张*"。
 func Name() MaskFunc {
 	return Keep(1, 0)
 }
 
-// Address 返回地址的默认脱敏函数，保留前六个字符。
+// Address 返回地址的默认脱敏函数，保留前六个字符，如 "浙江省杭州市************"。
 func Address() MaskFunc {
 	return Keep(6, 0)
 }
 
-// IP 返回 IP 地址的默认脱敏函数，全遮蔽。
+// IP 返回 IP 地址的默认脱敏函数，全遮蔽，输出与原值等长。
 func IP() MaskFunc {
 	return Keep(0, 0)
 }
 
-// Password 返回密码的默认脱敏函数，全遮蔽。
+// Password 返回密码的默认脱敏函数，全遮蔽；需要完全不留痕时改用 Replace("")。
 func Password() MaskFunc {
 	return Keep(0, 0)
 }
 
-// Secret 返回通用密文的默认脱敏函数，全遮蔽。
+// Secret 返回通用密文的默认脱敏函数，全遮蔽，用于令牌、AK/SK 等字段。
 func Secret() MaskFunc {
 	return Keep(0, 0)
 }
@@ -146,7 +183,7 @@ func Keep(prefix, suffix int) MaskFunc {
 	return KeepWithChar(prefix, suffix, '*')
 }
 
-// KeepWithChar 与 Keep 相同，但可自定义掩码字符。char 为零值时回退为 '*'。
+// KeepWithChar 与 Keep 相同，但可自定义掩码字符；char 为零值时回退为 '*'。
 func KeepWithChar(prefix, suffix int, char rune) MaskFunc {
 	if prefix < 0 {
 		prefix = 0
@@ -232,7 +269,10 @@ type Match struct {
 // 可替换片段，实现应自行忽略。Detector 会被并发调用，必须无副作用。
 type Detector func(text string) []Match
 
-// RegexOption 配置正则识别器。
+// RegexOption 是 Regex 的可选配置，用于补充 Go 正则不支持的前后边界断言。
+//
+// 选项按传入顺序应用到内部配置，后传入者覆盖先传入者；选项值为 nil 时跳过，
+// 因此可以安全地透传可能为空的配置。具体选项见 NotPrecededBy 与 NotFollowedBy。
 type RegexOption func(*regexConfig)
 
 // regexConfig 保存正则识别器的边界约束。
@@ -252,6 +292,10 @@ func NotPrecededBy(set string) RegexOption {
 }
 
 // NotFollowedBy 要求命中片段的后一个码点不在 set 中。
+//
+// set 是字符集合，按码点逐个比较，不是正则。用于排除"更长的数字串被截断命中"
+// 的情况，例如 NotFollowedBy("0123456789") 等价于 Python 正则里的 (?!\d)。
+// set 为空字符串时不做检查。
 func NotFollowedBy(set string) RegexOption {
 	return func(config *regexConfig) {
 		config.notFollowedBy = set
@@ -302,10 +346,17 @@ type rule struct {
 	priority int
 }
 
-// RuleOption 在注册时补充规则配置。
+// RuleOption 是 Register 的可选配置，用于补充检测器与优先级。
+//
+// 不传任何选项时，注册的规则只参与 Mask 按名脱敏，不参与 MaskText 自动识别，
+// 优先级为 0。选项值为 nil 时跳过。具体选项见 WithDetector 与 WithPriority。
 type RuleOption func(*rule)
 
 // WithDetector 让注册的类型参与 MaskText 的自动识别。
+//
+// detector 为 nil 时等价于不传该选项（该类型只能按名脱敏）。detector 会被并发
+// 调用，实现必须无副作用；可用 Regex 构造，也可自行实现。优先级默认 0，通常
+// 需要配合 WithPriority 指定，否则会输给内置规则。
 func WithDetector(detector Detector) RuleOption {
 	return func(r *rule) {
 		r.detector = detector
@@ -331,6 +382,11 @@ type Masker struct {
 }
 
 // New 构造脱敏器，并装入全部内置类型的默认规则。
+//
+// 返回的 Masker 已可直接使用：十个内置类型都能被 Mask 命中，其中 phone、
+// telephone、id_card、bank_card、email、ip 带检测器，参与 MaskText 自动识别。
+// 需要不同格式或额外类型时再调用 Register 覆盖。没有参数，也不会失败；每次
+// 调用返回互不影响的新实例。包级便捷函数使用包内单独的默认实例。
 func New() *Masker {
 	return &Masker{
 		rules: map[Type]rule{
@@ -477,7 +533,7 @@ func (m *Masker) MaskFields(data map[string]any, fields map[string]Type) map[str
 	return result
 }
 
-// Types 返回当前注册的全部类型，按字典序排列。
+// Types 返回当前注册的全部类型，按字典序排列；返回新切片，修改不影响注册表。
 func (m *Masker) Types() []Type {
 	m.mu.RLock()
 	types := make([]Type, 0, len(m.rules))
@@ -493,17 +549,17 @@ func (m *Masker) Types() []Type {
 // defaultMasker 承载包级便捷函数。
 var defaultMasker = New()
 
-// Mask 使用包级默认脱敏器按类型名脱敏。
+// Mask 使用包级默认脱敏器按类型名脱敏；类型未注册时返回 RedactedMarker。
 func Mask(typ Type, value string) string {
 	return defaultMasker.Mask(typ, value)
 }
 
-// MaskText 使用包级默认脱敏器对自由文本脱敏。
+// MaskText 使用包级默认脱敏器对自由文本脱敏；没有命中时原样返回。
 func MaskText(text string) string {
 	return defaultMasker.MaskText(text)
 }
 
-// MaskFields 使用包级默认脱敏器按字段映射脱敏。
+// MaskFields 使用包级默认脱敏器按字段映射脱敏，返回新 map。
 func MaskFields(data map[string]any, fields map[string]Type) map[string]any {
 	return defaultMasker.MaskFields(data, fields)
 }
@@ -513,7 +569,7 @@ func Register(typ Type, mask MaskFunc, opts ...RuleOption) error {
 	return defaultMasker.Register(typ, mask, opts...)
 }
 
-// Types 返回包级默认脱敏器已注册的全部类型。
+// Types 返回包级默认脱敏器已注册的全部类型，按字典序排列。
 func Types() []Type {
 	return defaultMasker.Types()
 }

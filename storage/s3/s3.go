@@ -14,19 +14,30 @@ import (
 )
 
 // ChecksumMode 控制上传时是否计算校验值。
+//
+// 取值必须与端点的能力匹配：AWS S3 与新版兼容端点支持对全部上传计算 CRC 类
+// 校验；部分旧版或私有化端点不支持 aws-chunked 编码，强行开启会导致上传失败。
 type ChecksumMode string
 
 const (
 	// ChecksumWhenRequired 只在调用方显式要求时计算校验值，兼容旧版端点。
+	//
+	// 零值（空字符串）即等同于此模式，是本包默认策略。
 	ChecksumWhenRequired ChecksumMode = "when_required"
 
 	// ChecksumAlways 对所有上传计算校验值，要求端点支持 aws-chunked。
+	//
+	// 开启后能及早发现传输损坏，但与不兼容的端点搭配时上传会失败，开启前
+	// 先用一个小对象验证。
 	ChecksumAlways ChecksumMode = "always"
 )
 
 // Config 是 S3 客户端配置。字段统一用小驼峰 tag，json / yaml / toml / mapstructure
 // 四种键名一致，json、yaml、toml 配置文件与 viper、koanf 这类库都能直接解码。
 // 只能代码注入的 HTTPClient 与 Credentials 标 "-"，不会从配置里读取。
+//
+// 最小可用配置：Endpoint、Region、AccessKeyID、SecretAccessKey（或 Credentials）。
+// 四个厂商的差异（endpoint 形态、region 前缀、path style）在 New 里归一化。
 type Config struct {
 	Endpoint        string       `json:"endpoint" yaml:"endpoint" toml:"endpoint" mapstructure:"endpoint"`                             // 为空时使用 AWS 默认端点；可带桶前缀（COS 常见形态）
 	Region          string       `json:"region" yaml:"region" toml:"region" mapstructure:"region"`                                     // 为空时回退 us-east-1；OSS 的 oss- 前缀会被去掉
@@ -44,6 +55,9 @@ type Config struct {
 }
 
 // Client 是 S3 客户端，实现 storage.Client。
+//
+// 必须通过 New 构造，零值不可用。可被多个 goroutine 并发调用，内部只持有一个
+// SDK 客户端与不可变配置，没有可变的共享状态。
 type Client struct {
 	config Config
 	sdk    *awss3.Client

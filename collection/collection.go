@@ -27,13 +27,16 @@ type Set[T comparable] struct {
 }
 
 // NewSet 用 values 构造集合，重复元素只保留一次。
+//
+// 参数 values 是可变参数，元素类型需可比较；不传时返回空集合。返回的 *Set
+// 总是可用，等价于声明零值后逐批 Add。集合不是并发安全的。
 func NewSet[T comparable](values ...T) *Set[T] {
 	s := &Set[T]{m: make(map[T]struct{}, len(values))}
 	addValues(s.m, values)
 	return s
 }
 
-// Add 把 values 加入集合，已存在的元素保持不变。
+// Add 把 values 加入集合，已存在的元素保持不变；零值可直接使用。
 func (s *Set[T]) Add(values ...T) {
 	if s.m == nil {
 		s.m = make(map[T]struct{}, len(values))
@@ -41,7 +44,7 @@ func (s *Set[T]) Add(values ...T) {
 	addValues(s.m, values)
 }
 
-// Remove 从集合中删除 values，不存在的元素会被忽略。
+// Remove 从集合中删除 values，不存在的元素会被忽略；不释放已分配的容量。
 func (s *Set[T]) Remove(values ...T) {
 	for _, v := range values {
 		delete(s.m, v)
@@ -65,6 +68,9 @@ func (s *Set[T]) Clear() {
 }
 
 // Values 返回集合中所有元素的新切片，顺序不保证。
+//
+// 返回的切片是新分配的，修改它不会影响集合；空集合返回空切片（非 nil，可直接
+// 遍历或序列化为 []）。需要稳定输出顺序时改用 OrderedSet 或自行排序。
 func (s *Set[T]) Values() []T {
 	values := make([]T, 0, len(s.m))
 	for v := range s.m {
@@ -73,7 +79,7 @@ func (s *Set[T]) Values() []T {
 	return values
 }
 
-// Clone 返回包含相同元素的独立集合。
+// Clone 返回包含相同元素的独立集合，增删互不影响。
 func (s *Set[T]) Clone() *Set[T] {
 	clone := &Set[T]{m: make(map[T]struct{}, len(s.m))}
 	for v := range s.m {
@@ -83,6 +89,9 @@ func (s *Set[T]) Clone() *Set[T] {
 }
 
 // Union 返回 s 与 other 的并集，不修改原集合。
+//
+// 参数 other 不能为 nil；返回值是新集合，包含 s 与 other 的全部元素，重复项只留
+// 一份。空集合与任何集合并集等于对方。
 func (s *Set[T]) Union(other *Set[T]) *Set[T] {
 	out := s.Clone()
 	for v := range other.m {
@@ -92,6 +101,9 @@ func (s *Set[T]) Union(other *Set[T]) *Set[T] {
 }
 
 // Intersect 返回 s 与 other 的交集，不修改原集合。
+//
+// 参数 other 不能为 nil；返回值是新集合，只含同时属于两者的元素。没有共同元素
+// 时返回空集合而不是 nil。
 func (s *Set[T]) Intersect(other *Set[T]) *Set[T] {
 	out := &Set[T]{m: make(map[T]struct{}, min(len(s.m), len(other.m)))}
 	for v := range s.m {
@@ -103,6 +115,9 @@ func (s *Set[T]) Intersect(other *Set[T]) *Set[T] {
 }
 
 // Difference 返回属于 s 但不属于 other 的元素，不修改原集合。
+//
+// 参数 other 不能为 nil；返回值是新集合。差集不可交换：s.Difference(other) 与
+// other.Difference(s) 结果不同。
 func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
 	out := &Set[T]{m: make(map[T]struct{}, len(s.m))}
 	for v := range s.m {
@@ -114,6 +129,9 @@ func (s *Set[T]) Difference(other *Set[T]) *Set[T] {
 }
 
 // Equal 报告两个集合的元素是否完全相同，与迭代顺序无关。
+//
+// 参数 other 不能为 nil；元素个数相同且逐个互相包含时返回 true。集合类型不保存
+// 顺序，因此 {1,2} 与 {2,1} 相等。
 func (s *Set[T]) Equal(other *Set[T]) bool {
 	if s.Len() != other.Len() {
 		return false
@@ -137,18 +155,21 @@ type OrderedSet[T comparable] struct {
 }
 
 // NewOrderedSet 用 values 构造保序集合，重复元素保留首次出现的位置。
+//
+// 参数 values 是可变参数，按传入顺序写入，因此结果的 Values() 与入参顺序一致
+// （去重后）。不传时返回空集合。集合不是并发安全的。
 func NewOrderedSet[T comparable](values ...T) *OrderedSet[T] {
 	s := &OrderedSet[T]{m: make(map[T]struct{}, len(values))}
 	s.addOrdered(values)
 	return s
 }
 
-// Add 把 values 加入集合，已存在的元素保持原位置。
+// Add 把 values 加入集合，已存在的元素保持原位置；零值可直接使用。
 func (s *OrderedSet[T]) Add(values ...T) {
 	s.addOrdered(values)
 }
 
-// Remove 从集合中删除 values，不存在的元素会被忽略。
+// Remove 从集合中删除 values，不存在的元素会被忽略；其余元素保持相对顺序。
 func (s *OrderedSet[T]) Remove(values ...T) {
 	for _, v := range values {
 		s.removeOrdered(v)
@@ -166,13 +187,16 @@ func (s *OrderedSet[T]) Len() int {
 	return len(s.order)
 }
 
-// Clear 清空集合，清空后仍可继续使用。
+// Clear 清空集合，清空后仍可继续使用；再 Add 时顺序从头开始。
 func (s *OrderedSet[T]) Clear() {
 	s.m = nil
 	s.order = nil
 }
 
 // Values 按插入顺序返回所有元素的新切片。
+//
+// 返回的是拷贝，修改它不会影响集合；空集合返回空切片（非 nil）。需要稳定、
+// 可预期的输出顺序时用它代替 Set.Values。
 func (s *OrderedSet[T]) Values() []T {
 	values := make([]T, len(s.order))
 	copy(values, s.order)
@@ -181,8 +205,12 @@ func (s *OrderedSet[T]) Values() []T {
 
 // SplitBySize 把 s 按每份最多 size 个元素切分。
 //
-// 除最后一份外每份恰好 size 个；空输入返回空切片。子切片与 s 共享
-// 底层数组，但容量裁剪到各自长度，对子切片 append 不会覆写相邻份。
+// 参数 s 是源切片；size 是每份的最大元素数，必须大于 0，否则返回错误。
+// 返回份数按 ceil(len(s)/size) 计算，除最后一份外每份恰好 size 个；空输入返回
+// 空切片（非 nil）而不是错误。
+//
+// 子切片与 s 共享底层数组，但容量裁剪到各自长度，对子切片 append 不会覆写相邻
+// 份；修改子切片中的元素仍会改变源切片。需要完全隔离时先 clone 源切片。
 func SplitBySize[T any](s []T, size int) ([][]T, error) {
 	if size < 1 {
 		return nil, fmt.Errorf("collection: 每份数量必须大于 0，得到 %d", size)
@@ -199,7 +227,7 @@ func SplitBySize[T any](s []T, size int) ([][]T, error) {
 	return parts, nil
 }
 
-// Clone 返回包含相同元素与顺序的独立集合。
+// Clone 返回包含相同元素与顺序的独立集合，增删互不影响。
 func (s *OrderedSet[T]) Clone() *OrderedSet[T] {
 	clone := &OrderedSet[T]{m: make(map[T]struct{}, len(s.m))}
 	clone.order = make([]T, len(s.order))
@@ -211,6 +239,9 @@ func (s *OrderedSet[T]) Clone() *OrderedSet[T] {
 }
 
 // Union 返回 s 与 other 的并集，顺序为 s 的顺序再接 other 的新增元素。
+//
+// 参数 other 不能为 nil；返回值是新集合，不修改两个入参。重复元素保留在 s 中
+// 首次出现的位置。
 func (s *OrderedSet[T]) Union(other *OrderedSet[T]) *OrderedSet[T] {
 	out := s.Clone()
 	out.addOrdered(other.order)
@@ -218,6 +249,9 @@ func (s *OrderedSet[T]) Union(other *OrderedSet[T]) *OrderedSet[T] {
 }
 
 // Intersect 返回 s 与 other 的交集，保持 s 的顺序。
+//
+// 参数 other 不能为 nil；返回值是新集合。结果顺序取自 s，与 other 的顺序无关；
+// 没有共同元素时返回空集合而不是 nil。
 func (s *OrderedSet[T]) Intersect(other *OrderedSet[T]) *OrderedSet[T] {
 	out := &OrderedSet[T]{m: make(map[T]struct{}, min(len(s.m), len(other.m)))}
 	for _, v := range s.order {
@@ -230,6 +264,8 @@ func (s *OrderedSet[T]) Intersect(other *OrderedSet[T]) *OrderedSet[T] {
 }
 
 // Difference 返回属于 s 但不属于 other 的元素，保持 s 的顺序。
+//
+// 参数 other 不能为 nil；返回值是新集合。差集不可交换，结果顺序取自 s。
 func (s *OrderedSet[T]) Difference(other *OrderedSet[T]) *OrderedSet[T] {
 	out := &OrderedSet[T]{m: make(map[T]struct{}, len(s.m))}
 	for _, v := range s.order {
@@ -242,6 +278,9 @@ func (s *OrderedSet[T]) Difference(other *OrderedSet[T]) *OrderedSet[T] {
 }
 
 // Equal 报告两个集合的元素是否完全相同，不比较顺序。
+//
+// 参数 other 不能为 nil。与 Set.Equal 的语义一致：两个集合即使插入顺序不同，
+// 元素集合相同就算相等；需要比较顺序时用 Values 自行对比。
 func (s *OrderedSet[T]) Equal(other *OrderedSet[T]) bool {
 	if s.Len() != other.Len() {
 		return false
@@ -256,9 +295,13 @@ func (s *OrderedSet[T]) Equal(other *OrderedSet[T]) bool {
 
 // SplitByParts 把 s 均分为 parts 份。
 //
-// 不能整除时余数从靠前的份开始各多 1 个，任意两份长度相差不超过 1。
-// parts 大于元素个数时只产出非空份，不会生成空份。子切片与 s 共享
-// 底层数组，但容量裁剪到各自长度。
+// 参数 s 是源切片；parts 是期望的份数，必须大于 0，否则返回错误。
+// 不能整除时余数从靠前的份开始各多 1 个，任意两份长度相差不超过 1；parts 大于
+// 元素个数时只产出非空份，不会生成空份（因此实际份数可能少于 parts）；空输入
+// 返回空切片（非 nil）。
+//
+// 子切片与 s 共享底层数组，但容量裁剪到各自长度，对子切片 append 不会覆写
+// 相邻份；修改元素仍会影响源切片。
 func SplitByParts[T any](s []T, parts int) ([][]T, error) {
 	if parts < 1 {
 		return nil, fmt.Errorf("collection: 份数必须大于 0，得到 %d", parts)
@@ -280,7 +323,8 @@ func SplitByParts[T any](s []T, parts int) ([][]T, error) {
 
 // Dedupe 按首次出现顺序去重，返回新切片。
 //
-// 返回值使用独立底层数组，不与 s 共享；空输入返回空切片。
+// 参数 s 是源切片，元素需可比较；返回每个值首次出现的位置组成的切片。返回值
+// 使用独立底层数组，不与 s 共享，修改结果不会影响源切片；空输入返回空切片。
 func Dedupe[T comparable](s []T) []T {
 	out := make([]T, 0, len(s))
 	seen := make(map[T]struct{}, len(s))

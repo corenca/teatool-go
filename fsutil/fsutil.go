@@ -69,6 +69,10 @@ func EnsureParent(filePath string) error {
 }
 
 // ErrOutsideBase 表示 JoinWithin 的 name 越出了基准目录。
+//
+// 返回的错误已经用 %w 包装该哨兵，调用方用 errors.Is(err, fsutil.ErrOutsideBase)
+// 判断即可，不要把错误字符串拿去做前缀匹配。空 name、绝对路径、带 .. 的路径都
+// 会命中它。
 var ErrOutsideBase = errors.New("fsutil: 路径越出基准目录")
 
 // JoinWithin 把 name 作为相对路径拼到 base 下，并拒绝越出 base 的路径。

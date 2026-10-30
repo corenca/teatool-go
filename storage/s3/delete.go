@@ -15,7 +15,7 @@ import (
 // deleteBatchSize 是单次批量删除请求的 key 上限，S3 与各兼容端点一致。
 const deleteBatchSize = 1000
 
-// Delete 删除单个对象；对象不存在视为成功。
+// Delete 把服务端返回的 404 视为成功，其余错误按契约映射。
 func (c *Client) Delete(ctx context.Context, bucket, key string) error {
 	_, err := c.sdk.DeleteObject(ctx, &awss3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
@@ -31,7 +31,8 @@ func (c *Client) Delete(ctx context.Context, bucket, key string) error {
 	return nil
 }
 
-// DeleteMany 分批批量删除；部分失败用 errors.Join 聚合。
+// DeleteMany 每批 1000 个，并固定附加 Content-MD5（OSS/COS 强制要求）；某批请求
+// 失败不会阻止后续批次，全部错误最后聚合。
 func (c *Client) DeleteMany(ctx context.Context, bucket string, keys []string) error {
 	var errs []error
 	for _, batch := range splitKeys(keys, deleteBatchSize) {
@@ -56,10 +57,8 @@ func (c *Client) DeleteMany(ctx context.Context, bucket string, keys []string) e
 	return errors.Join(errs...)
 }
 
-// DeletePrefix 删除前缀下的全部对象；空前缀会被拒绝以免清空整个桶。
-//
-// 逐页列举后再删除该页，内存占用与对象总数无关；中途失败会继续删除后续页面，
-// 最后一并返回聚合错误。删除期间新写入该前缀的对象不在本次范围内。
+// DeletePrefix 逐页列举后再删除该页，内存占用与对象总数无关；中途失败仍继续
+// 删除后续页面，最后一并返回聚合错误。
 func (c *Client) DeletePrefix(ctx context.Context, bucket, prefix string) error {
 	if prefix == "" {
 		return fmt.Errorf("%w: 删除前缀不能为空", storage.ErrInvalidArgument)

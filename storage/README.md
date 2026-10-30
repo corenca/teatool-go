@@ -266,6 +266,53 @@ YAML、TOML 文件与 viper、koanf 这类库都能直接解码。`HTTPClient` �
 - 服务端不支持某项能力时返回 `ErrUnsupported`（HTTP 501 / `NotImplemented`），
   例如旧端点拒绝 `aws-chunked` 校验。
 
+## 操作参数速查
+
+| 参数结构 | 字段 | 零值含义 | 非法时 |
+| --- | --- | --- | --- |
+| `ReaderOptions` | `Range` | `nil`，读整个对象 | 区间越界宽容处理，不报错 |
+| `WriterOptions` | `ContentType` / `ContentDisposition` / `CacheControl` | 空，不设置该头 | — |
+| | `Metadata` | 空，无自定义元数据 | 键写入前统一转小写 |
+| | `PartSize` | `0`，用 `DefaultPartSize`（8MiB） | 不在 5MiB–5GiB → `ErrInvalidArgument` |
+| | `Concurrency` | `0`，用 `DefaultConcurrency`（3） | 负数 → `ErrInvalidArgument` |
+| `ListOptions` | `Prefix` / `Delimiter` / `Cursor` | 空，从头列举、不分组 | 游标不要自行构造 |
+| | `MaxKeys` | `<= 0` 用 `DefaultListPageSize`（1000） | — |
+| `PresignOptions` | `Expires` | `0` 非法，必须显式给出 | `<= 0` 或超过 7 天 → `ErrInvalidArgument` |
+| | `FileName` | 空，不覆写下载名 | 仅 `PresignGet` 使用 |
+
+## 常见错误
+
+**`Stat` / `Get` 报 `ErrObjectNotFound`，但桶是存在的**：键写错了，或桶名写错
+（HEAD 请求 404 无错误体，区分不了桶与对象的缺失）。先用 `List` 看一下实际键。
+
+**`Put` 返回 `ErrInvalidArgument`**：`PartSize` 小于 5MiB、大于 5GiB，或
+`Concurrency` 为负数。分片小于 5MiB 会被 OSS/COS 拒绝，所以库在发请求前就拦住。
+
+**上传大文件时内存暴涨**：峰值内存约为 `PartSize × Concurrency`。上 GB 级文件
+时把 `PartSize` 保持在默认 8MiB、`Concurrency` 不超过 4。
+
+**下载到一半进程退出，留下半个文件**：`Download` 用临时文件 + `rename`，正常
+失败不会留下半成品；如果进程被强杀，临时文件会残留在目标目录，可定期清理
+`*.tmp`。
+
+**`Exists` 返回 `(false, nil)` 但对象明明在**：检查前缀/键是否多了斜杠，或桶是否
+开启了版本控制导致看到的是删除标记。`Exists` 只反映当前可见版本。
+
+**`Walk` 回调报错后整个遍历停止**：设计如此，`fn` 的错误会原样返回，用于提前
+终止。需要跳过单条错误就在 `fn` 里记录后返回 `nil`。
+
+**批量删除报错但对象少了**：`DeleteMany` 是尽力而为，返回错误代表至少一项失败，
+已成功的不会回滚。用 `errors.As` 取出 `*storage.DeleteError` 逐个查看 `Key`。
+
+**预签名 URL 403**：有效期已过、系统时间偏差过大，或生成 URL 后修改了桶/键。
+预签名 URL 里的查询参数是签名的一部分，不要拼接或改写。
+
+**MinIO / 私有化部署连接失败**：`UsePathStyle` 没开，虚拟托管寻址解析成了
+`bucket.endpoint`。本地 RustFS/MinIO 必须打开该选项。
+
+**`Credential` 配了但被忽略**：`Credentials` 非空时优先于静态密钥，此时
+`AccessKeyID` / `SecretAccessKey` / `SessionToken` 可以不填，但填了也不会生效。
+
 ## 明确的非目标
 
 桶管理（创建/删除/ACL/生命周期/版本控制/标签）、断点续传、重试策略、限速、

@@ -19,7 +19,8 @@ const (
 	copyPartSize = 1 << 30
 )
 
-// Copy 服务端复制，支持跨桶。超过 5GiB 的对象自动转分片复制并保留源元信息。
+// Copy 超过 5GiB 时改用 UploadPartCopy 分片复制（分片 1GiB），并保留源元信息；
+// 未超过时走单次 CopyObject。数据不经过本进程。
 func (c *Client) Copy(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) error {
 	// 先取源对象大小：CopyObject 单次上限 5GiB，超出必须分片。
 	info, err := c.Stat(ctx, srcBucket, srcKey)
@@ -37,7 +38,8 @@ func (c *Client) Copy(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey 
 	return c.multipartCopy(ctx, info, srcBucket, srcKey, dstBucket, dstKey, copyPartSize)
 }
 
-// Move 由复制与删除组合实现，非原子。
+// Move 由 Copy 与 Delete 组合实现；删除源失败时错误信息会标明是复制成功后的事务
+// 失败，此时两个对象同时存在。
 func (c *Client) Move(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) error {
 	if err := c.Copy(ctx, srcBucket, srcKey, dstBucket, dstKey); err != nil {
 		return err
