@@ -2,6 +2,7 @@ package excel_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -92,5 +93,21 @@ func TestRowError(t *testing.T) {
 	}
 	if !errors.Is(err, cause) {
 		t.Fatalf("Unwrap 未生效: %v", err)
+	}
+}
+
+// TestRowErrorAsType 场景：用 Go 1.26+ 的 errors.AsType 从包装错误中取出 *RowError。
+func TestRowErrorAsType(t *testing.T) {
+	cause := errors.New("解析失败")
+	original := &excel.RowError{Row: 7, Column: "金额", Err: cause}
+	err := fmt.Errorf("外层错误: %w", original)
+
+	rowErr, ok := errors.AsType[*excel.RowError](err)
+	t.Logf("rowErr=%+v ok=%v", rowErr, ok)
+	if !ok || rowErr != original {
+		t.Fatalf("rowErr=%+v ok=%v", rowErr, ok)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("errors.Is 未穿透: %v", err)
 	}
 }

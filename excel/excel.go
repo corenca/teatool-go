@@ -177,7 +177,7 @@ type SheetWriter struct {
 //
 // Row 是 Excel 物理行号（1-based，含表头与跳过行）；Column 是出错列：
 // map 层是 Column.Key，结构体层是字段 tag 的表头；整行错误时为空。
-// 用 errors.As 取出，再用 Unwrap/errors.Is 判断原因。
+// 用 errors.AsType 取出，再用 Unwrap/errors.Is 判断原因。
 type RowError struct {
 	Row    int
 	Column string
@@ -192,7 +192,7 @@ func (e *RowError) Error() string {
 	return fmt.Sprintf("excel: 第 %d 行: %v", e.Row, e.Err)
 }
 
-// Unwrap 返回底层错误，供 errors.Is/errors.As 使用。
+// Unwrap 返回底层错误，供 errors.Is/errors.AsType 使用。
 func (e *RowError) Unwrap() error {
 	return e.Err
 }

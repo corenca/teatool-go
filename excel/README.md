@@ -271,11 +271,12 @@ var (
 行级错误用 `*RowError`，含 Excel 物理行号与列名：
 
 ```go
-var rowErr *excel.RowError
-if errors.As(err, &rowErr) {
+if rowErr, ok := errors.AsType[*excel.RowError](err); ok {
 	fmt.Println(rowErr.Row, rowErr.Column)
 }
 ```
+
+`errors.AsType` 从 Go 1.26 开始提供，本项目要求 Go 1.27+，优先使用它；`errors.As` 仍然可用。
 
 `RowError.Column` 在 map 层是 `Column.Key`，在结构体层是字段 tag 的表头。
 
