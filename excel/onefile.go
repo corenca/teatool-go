@@ -28,7 +28,7 @@ func ReadFile(path, sheet string, opts ReadOptions) ([]map[string]string, error)
 // sheet 为空时取第一个工作表；与 ReadInto 一样不接受 opts.Columns（非空返回
 // ErrInvalidColumn）。列/tag 无效返回 ErrInvalidColumn，行级错误是 *RowError。
 func ReadFileInto[T any](path, sheet string, opts ReadOptions) ([]T, error) {
-	if _, _, _, err := prepareStruct[T](opts.Columns); err != nil {
+	if _, _, _, err := prepareStruct[T](opts.Columns, true); err != nil {
 		return nil, err
 	}
 	rd, err := OpenFile(path)
@@ -70,7 +70,7 @@ func WriteFileFrom[T any](path, sheet string, rows []T, opts WriteOptions) error
 	if sheet == "" {
 		return fmt.Errorf("%w: 名称为空", ErrInvalidSheetName)
 	}
-	if _, _, _, err := prepareStruct[T](opts.Columns); err != nil {
+	if _, _, _, err := prepareStruct[T](opts.Columns, false); err != nil {
 		return err
 	}
 	b, err := NewFileBuilder(path)

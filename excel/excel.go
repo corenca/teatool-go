@@ -65,7 +65,8 @@ type Column struct {
 	// Key 是读取结果 map 的键，也是写出时从数据行取值的键。
 	// 为空时读取/写出都会退化为使用 Header。
 	Key string
-	// Type 是读取时的校验与规范化方式，默认 Text。写出时忽略。
+	// Type 是读取时的校验与规范化方式，默认 Text。写出不消费 Type 与 Layout，
+	// 但装配期仍会校验其合法性（未知类型或日期类型缺 Layout 会报错）。
 	Type ValueType
 	// Layout 是 Date/DateTime/Time 的 Go 时间布局，例如 "2006-01-02"。
 	// 它用于输出格式；输入是 Excel 日期序列号，不按该布局解析文本。
@@ -174,8 +175,9 @@ type SheetWriter struct {
 
 // RowError 是带位置的读取/写出行级错误。
 //
-// Row 是 Excel 物理行号（1-based，含表头与跳过行）；Column 是列 Key，
-// 整行错误时为空。用 errors.As 取出，再用 Unwrap/errors.Is 判断原因。
+// Row 是 Excel 物理行号（1-based，含表头与跳过行）；Column 是出错列：
+// map 层是 Column.Key，结构体层是字段 tag 的表头；整行错误时为空。
+// 用 errors.As 取出，再用 Unwrap/errors.Is 判断原因。
 type RowError struct {
 	Row    int
 	Column string
@@ -201,7 +203,8 @@ var (
 	ErrUnsupportedFormat = errors.New("excel: 不支持的文件格式")
 	// ErrSheetNotFound 表示指定的工作表不存在。
 	ErrSheetNotFound = errors.New("excel: 工作表不存在")
-	// ErrEmptySheet 表示工作表为空，或有表头模式下找不到表头行。
+	// ErrEmptySheet 表示工作簿/工作表为空，或表头模式下找不到表头行；
+	// NoHeader 模式下空工作表返回空结果，不返回该错误。
 	ErrEmptySheet = errors.New("excel: 工作表为空或没有表头行")
 	// ErrMissingColumn 表示声明的列在表头中不存在。
 	ErrMissingColumn = errors.New("excel: 声明的列在表头中不存在")
@@ -211,7 +214,7 @@ var (
 	ErrColumnMismatch = errors.New("excel: 无表头模式下声明列数与文件列宽不一致")
 	// ErrInvalidColumn 表示列声明或选项本身不合法。
 	ErrInvalidColumn = errors.New("excel: 列声明无效")
-	// ErrClosed 表示 Reader/Builder/SheetWriter 已经关闭或放弃。
+	// ErrClosed 表示 Reader/Builder/SheetWriter/StructSheetWriter 已经关闭或放弃。
 	ErrClosed = errors.New("excel: 已关闭")
 	// ErrSheetExists 表示要创建的工作表已经存在（大小写不敏感）。
 	ErrSheetExists = errors.New("excel: 工作表已存在")

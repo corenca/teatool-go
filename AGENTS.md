@@ -52,7 +52,9 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   `ReadFile`/`ReadFileInto`/`WriteFile`/`WriteFileFrom`。读取严格按声明：多余列忽略，缺列报错；无表头模式声明列数必须
   等于文件实际列宽。值统一 string，`Type` 只做校验与规范化，map 层的日期类型必须
   `RawValues=true`（取序列号）；结构体层 `time.Time` 先按 layout、失败再按序列号
-  解析。写出每行必须包含全部声明 Key，缺一个报 `*RowError`（`ErrMissingKey`）；
+  解析。结构体层还支持 `encoding.TextMarshaler`/`TextUnmarshaler` 与嵌套/匿名字段
+  展平：父字段 tag 第一段作为前缀，嵌套指针按需分配，只调用顶层 Validate。
+  写出每行必须包含全部声明 Key，缺一个报 `*RowError`（`ErrMissingKey`）；
   以 `=` 开头的值按文本写。任一行写失败后 Builder 进入失败态，`Close` 返回原错误
   且不落盘，只能 `Abort`。行级错误带 Excel 物理行号。文件只做 xlsx，扩展名与 ZIP
   魔数双重校验。

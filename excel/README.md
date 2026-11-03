@@ -134,6 +134,7 @@ if err := sw.Close(); err != nil { // 只 Flush 当前 sheet
 - 列顺序、表头、`width` 来自字段 tag；不接受 `opts.Columns`。
 - `sw.Close` 只 Flush 当前 sheet；`Builder.Close` 会自动关闭未关闭的句柄。
 - `Builder.WriteFrom` 是“`AddSheetFrom` + 逐行 `Write` + `Close`”的批量封装。
+- Excelize 流式写要求行号递增、只能追加；同一 sheet 不能混用普通写和流式写。缓冲区超过 16MB 时会落临时文件，因此不要边写边读同一 sheet。
 
 ## 流式读取
 
@@ -165,7 +166,7 @@ err := s.EachInto[User](excel.ReadOptions{}, func(rowNum int, u User) error {
 | --- | --- |
 | `Header` | 表头文本；有表头读取时按它匹配，写出时为空则用 `Key` |
 | `Key` | 读取结果 map 的键、写出行取值的键；为空时用 `Header` |
-| `Type` | 读取校验与规范化方式，默认 `Text` |
+| `Type` | 读取校验与规范化方式，默认 `Text`；写出不消费，但装配期仍校验合法性 |
 | `Layout` | `Date`/`DateTime`/`Time` 的输出布局；必填 |
 | `Required` | 读取时空单元格报 `*RowError` |
 | `Width` | 写出列宽，0 表示不设置；读取时忽略 |
@@ -192,7 +193,7 @@ rows, err := s.Read(excel.ReadOptions{
 })
 ```
 
-无表头时声明按位置对应 A、B、C；声明列数必须等于文件实际列宽（所有数据行中最宽一行的有效单元格数），否则 `ErrColumnMismatch`。
+无表头时声明按位置对应 A、B、C；声明列数必须等于文件实际列宽（所有数据行中最宽一行的有效单元格数），否则 `ErrColumnMismatch`。`NoHeader` 下空工作表返回空结果，不返回 `ErrEmptySheet`。
 
 ## 结构体映射
 
@@ -207,10 +208,13 @@ type User struct {
 
 - tag 第一段是表头；没有 tag 时用字段名。
 - 选项：`layout:`（`time.Time` 必填）、`required`、`width:`；`excel:"-"` 跳过。
-- 支持 `string`、`bool`、各宽度 `int`/`uint`、`float32/64`、`time.Time` 以及它们的一层指针；其他类型装配期报 `ErrInvalidColumn`。
+- 支持 `string`、`bool`、各宽度 `int`/`uint`、`float32/64`、`time.Time` 以及它们的一层指针。
+- 非标量自定义类型只要实现 `encoding.TextMarshaler`（写）或 `encoding.TextUnmarshaler`（读）即可按文本列处理；`time.Time` 仍优先走 layout/序列号。
+- 嵌套/匿名字段会递归展平：父字段 tag 的第一段作为前缀，生成 `前缀.子表头`；不写父 tag 时叶子表头保持原样。父字段不支持 `required`/`width`/`layout` 等选项，选项写在叶子字段上。
+- 嵌套指针读取时有任一非空叶子才分配，全空保持 `nil`；写出 `nil` 时整组子列写空。
+- 只有顶层结构体的 `Validate() error` 会被调用；嵌套结构体自身的 `Validate` 不会单独调用。
 - 结构体层不接受 `opts.Columns`；列由字段与 tag 决定。
 - `time.Time` 先按 `layout` 解析，失败再按 Excel 日期序列号解析；读真实日期单元格建议 `RawValues: true`。
-- 实现了 `Validate() error` 的值会在每行转换后调用。
 
 ### 可空字段与零值
 
@@ -233,7 +237,7 @@ if u.Age == nil {
 
 ## 工作表名
 
-`AddSheet`/`AddSheetRows`/`WriteFrom` 以及 `WriteFile`/`WriteFileFrom` 都要求非空名字，规则与 Excelize 一致：
+`AddSheet`/`AddSheetFrom`/`AddSheetRows`/`WriteFrom` 以及 `WriteFile`/`WriteFileFrom` 都要求非空名字，规则与 Excelize 一致：
 
 - 1–31 个 UTF-16 单元（emoji 算 2）；
 - 不含 `:\/?*[]`；
@@ -273,6 +277,8 @@ if errors.As(err, &rowErr) {
 }
 ```
 
+`RowError.Column` 在 map 层是 `Column.Key`，在结构体层是字段 tag 的表头。
+
 ## 常见错误
 
 - **缺列**：声明了文件里不存在的表头 → `ErrMissingColumn`。
@@ -288,6 +294,7 @@ if errors.As(err, &rowErr) {
 
 - 不支持在已有工作簿上追加/修改 sheet；只创建新工作簿。
 - 不支持并发写多个 sheet；一次只有一个活动 sheet。
+- 流式写必须按行递增追加，不能在同一 sheet 混用普通写和流式写；Excelize 缓冲区超过 16MB 时会使用临时文件。
 - 不做自动列宽、样式 DSL、图片/图表/批注/公式写入。
 - 合并单元格只有左上角有值；公式取缓存值。
 - `Sheets()` 可能包含 chart/dialog sheet（Excelize 没有公开的类型判断）；非 worksheet 上的 `Read/Each` 会由 Excelize 报错。

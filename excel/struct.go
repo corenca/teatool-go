@@ -1,6 +1,7 @@
 package excel
 
 import (
+	"encoding"
 	"errors"
 	"fmt"
 	"reflect"
@@ -11,18 +12,22 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-// timeType 是 time.Time 的类型对象，用于和字段类型比较。
-var timeType = reflect.TypeFor[time.Time]()
+// 结构体反射用到的类型对象。
+var (
+	timeType            = reflect.TypeFor[time.Time]()
+	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
+	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
+)
 
 // fieldSpec 是结构体字段解析后的列声明。
 type fieldSpec struct {
-	index    int          // 字段在结构体中的下标
+	index    []int        // 从根结构体到叶子字段的下标路径
 	header   string       // Excel 表头名
-	typ      reflect.Type // 字段类型；指针字段取元素类型
+	typ      reflect.Type // 叶子字段类型；指针字段取元素类型
 	layout   string       // time.Time 的布局
 	required bool         // 空值是否报错
 	width    float64      // 写出列宽
-	pointer  bool         // 是否为指针字段
+	pointer  bool         // 叶子字段是否为指针
 }
 
 // ReadInto 把当前工作表读成结构体切片。
@@ -57,7 +62,7 @@ func eachIntoSheet[T any](s *SheetReader, opts ReadOptions, fn func(rowNum int, 
 	if err := s.reader.check(); err != nil {
 		return err
 	}
-	typ, fields, hasTime, err := prepareStruct[T](opts.Columns)
+	typ, fields, hasTime, err := prepareStruct[T](opts.Columns, true)
 	if err != nil {
 		return err
 	}
@@ -81,7 +86,7 @@ func eachIntoSheet[T any](s *SheetReader, opts ReadOptions, fn func(rowNum int, 
 func decodeStructValue[T any](typ reflect.Type, fields []fieldSpec, row map[string]string, rowNum int, date1904 bool) (T, error) {
 	value := reflect.New(typ).Elem()
 	for _, f := range fields {
-		if err := setStructField(value.Field(f.index), f, row[f.header], rowNum, date1904); err != nil {
+		if err := setStructField(value, f, row[f.header], rowNum, date1904); err != nil {
 			var zero T
 			return zero, err
 		}
@@ -115,7 +120,7 @@ func (b *Builder) AddSheetFrom[T any](name string, opts WriteOptions) (*StructSh
 	if err := b.check(); err != nil {
 		return nil, err
 	}
-	_, fields, _, err := prepareStruct[T](opts.Columns)
+	_, fields, _, err := prepareStruct[T](opts.Columns, false)
 	if err != nil {
 		return nil, err
 	}
@@ -145,9 +150,10 @@ func (w *StructSheetWriter[T]) Write(value T) error {
 	}
 
 	row := make(map[string]string, len(w.fields))
-	rv := reflect.ValueOf(value)
+	// 取地址让指针接收者的 TextMarshaler 也能被调用。
+	rv := reflect.ValueOf(&value).Elem()
 	for _, f := range w.fields {
-		text, err := formatField(rv.Field(f.index), f)
+		text, err := formatStructField(rv, f)
 		if err != nil {
 			re := &RowError{Row: w.sheet.rowNum, Column: f.header, Err: err}
 			w.sheet.builder.fail(re)
@@ -183,7 +189,9 @@ func (b *Builder) WriteFrom[T any](name string, rows []T, opts WriteOptions) err
 }
 
 // prepareStruct 校验目标类型与 tag，并返回结构体类型与字段声明。
-func prepareStruct[T any](cols []Column) (reflect.Type, []fieldSpec, bool, error) {
+//
+// forRead 为 true 时按读取方向校验字段类型，false 时按写出方向校验。
+func prepareStruct[T any](cols []Column, forRead bool) (reflect.Type, []fieldSpec, bool, error) {
 	if len(cols) > 0 {
 		return nil, nil, false, fmt.Errorf("%w: 结构体层不接受 Columns", ErrInvalidColumn)
 	}
@@ -191,7 +199,7 @@ func prepareStruct[T any](cols []Column) (reflect.Type, []fieldSpec, bool, error
 	if typ.Kind() != reflect.Struct {
 		return nil, nil, false, fmt.Errorf("%w: 目标类型必须是结构体，实际是 %s", ErrInvalidColumn, typ)
 	}
-	fields, err := structFields(typ)
+	fields, err := structFields(typ, forRead)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -205,31 +213,12 @@ func prepareStruct[T any](cols []Column) (reflect.Type, []fieldSpec, bool, error
 	return typ, fields, hasTime, nil
 }
 
-// structFields 解析结构体的全部导出字段。
-func structFields(typ reflect.Type) ([]fieldSpec, error) {
+// structFields 递归解析结构体的全部导出叶子字段。
+func structFields(typ reflect.Type, forRead bool) ([]fieldSpec, error) {
 	fields := make([]fieldSpec, 0, typ.NumField())
 	headers := make(map[string]struct{}, typ.NumField())
-	for i := 0; i < typ.NumField(); i++ {
-		f := typ.Field(i)
-		if f.PkgPath != "" {
-			continue // 未导出字段忽略
-		}
-		if f.Anonymous {
-			return nil, fmt.Errorf("%w: 不支持匿名字段 %s", ErrInvalidColumn, f.Name)
-		}
-		tag := f.Tag.Get("excel")
-		if name, _, _ := strings.Cut(tag, ","); strings.TrimSpace(name) == "-" {
-			continue
-		}
-		spec, err := parseFieldTag(f, i, tag)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := headers[spec.header]; ok {
-			return nil, fmt.Errorf("%w: 字段 %s 的表头 %q 重复", ErrInvalidColumn, f.Name, spec.header)
-		}
-		headers[spec.header] = struct{}{}
-		fields = append(fields, spec)
+	if err := collectFields(typ, nil, "", forRead, &fields, headers); err != nil {
+		return nil, err
 	}
 	if len(fields) == 0 {
 		return nil, fmt.Errorf("%w: 结构体没有可导出的字段", ErrInvalidColumn)
@@ -237,8 +226,88 @@ func structFields(typ reflect.Type) ([]fieldSpec, error) {
 	return fields, nil
 }
 
-// parseFieldTag 解析 excel tag 与字段类型。
-func parseFieldTag(f reflect.StructField, index int, tag string) (fieldSpec, error) {
+// collectFields 遍历一层结构体，并把嵌套结构体展平成叶子字段。
+//
+// prefix 是父级 tag 提供的列前缀；非空时最终表头为 prefix + "." + 叶子表头。
+func collectFields(typ reflect.Type, path []int, prefix string, forRead bool, fields *[]fieldSpec, headers map[string]struct{}) error {
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.PkgPath != "" {
+			continue // 未导出字段忽略
+		}
+		tag := f.Tag.Get("excel")
+		name, opts, _ := strings.Cut(tag, ",")
+		name = strings.TrimSpace(name)
+		if name == "-" {
+			continue
+		}
+
+		fieldPath := append(append([]int(nil), path...), i)
+		fieldType, err := derefFieldType(f.Type)
+		if err != nil {
+			return fmt.Errorf("%w: 字段 %s %s", ErrInvalidColumn, f.Name, err)
+		}
+		if isNestedStruct(fieldType) {
+			if strings.TrimSpace(opts) != "" {
+				return fmt.Errorf("%w: 嵌套结构体字段 %s 不支持 tag 选项 %q", ErrInvalidColumn, f.Name, strings.TrimSpace(opts))
+			}
+			childPrefix := prefix
+			if name != "" {
+				if childPrefix != "" {
+					childPrefix += "." + name
+				} else {
+					childPrefix = name
+				}
+			}
+			before := len(*fields)
+			if err := collectFields(fieldType, fieldPath, childPrefix, forRead, fields, headers); err != nil {
+				return err
+			}
+			if len(*fields) == before {
+				return fmt.Errorf("%w: 嵌套结构体字段 %s 没有可导出的叶子字段", ErrInvalidColumn, f.Name)
+			}
+			continue
+		}
+
+		spec, err := parseFieldTag(f, fieldPath, tag, forRead)
+		if err != nil {
+			return err
+		}
+		if prefix != "" {
+			spec.header = prefix + "." + spec.header
+		}
+		if _, ok := headers[spec.header]; ok {
+			return fmt.Errorf("%w: 字段 %s 的表头 %q 重复", ErrInvalidColumn, f.Name, spec.header)
+		}
+		headers[spec.header] = struct{}{}
+		*fields = append(*fields, spec)
+	}
+	return nil
+}
+
+// derefFieldType 去掉一层指针；多层指针返回错误。
+func derefFieldType(t reflect.Type) (reflect.Type, error) {
+	if t.Kind() == reflect.Pointer {
+		if t.Elem().Kind() == reflect.Pointer {
+			return nil, errors.New("不支持多层指针")
+		}
+		t = t.Elem()
+	}
+	return t, nil
+}
+
+// isNestedStruct 判断字段是否应作为嵌套容器展平。
+//
+// time.Time 与实现文本接口的自定义类型保持为叶子列。
+func isNestedStruct(t reflect.Type) bool {
+	if t == timeType || t.Kind() != reflect.Struct {
+		return false
+	}
+	return !implementsTextMarshaler(t) && !implementsTextUnmarshaler(t)
+}
+
+// parseFieldTag 解析叶子字段的 excel tag 与类型。
+func parseFieldTag(f reflect.StructField, index []int, tag string, forRead bool) (fieldSpec, error) {
 	spec := fieldSpec{index: index, header: f.Name, typ: f.Type}
 	parts := strings.Split(tag, ",")
 	if header := strings.TrimSpace(parts[0]); header != "" {
@@ -273,7 +342,7 @@ func parseFieldTag(f reflect.StructField, index int, tag string) (fieldSpec, err
 		spec.pointer = true
 		spec.typ = f.Type.Elem()
 	}
-	if !supportedFieldType(spec.typ) {
+	if !supportedFieldType(spec.typ, forRead) {
 		return spec, fmt.Errorf("%w: 字段 %s 的类型 %s 不支持", ErrInvalidColumn, f.Name, f.Type)
 	}
 	if spec.typ == timeType && spec.layout == "" {
@@ -282,9 +351,18 @@ func parseFieldTag(f reflect.StructField, index int, tag string) (fieldSpec, err
 	return spec, nil
 }
 
-// supportedFieldType 判断字段类型是否在白名单内。
-func supportedFieldType(t reflect.Type) bool {
+// supportedFieldType 判断字段类型是否支持当前读/写方向。
+//
+// 标量类型直接支持；非标量类型必须实现对应方向的 encoding.Text 接口。
+func supportedFieldType(t reflect.Type, forRead bool) bool {
 	if t == timeType {
+		return true
+	}
+	if forRead {
+		if implementsTextUnmarshaler(t) {
+			return true
+		}
+	} else if implementsTextMarshaler(t) {
 		return true
 	}
 	switch t.Kind() {
@@ -298,13 +376,27 @@ func supportedFieldType(t reflect.Type) bool {
 	}
 }
 
-// setStructField 把一列字符串写入字段。
-func setStructField(dst reflect.Value, f fieldSpec, raw string, rowNum int, date1904 bool) error {
+// implementsTextMarshaler 判断类型或其指针是否实现 encoding.TextMarshaler。
+func implementsTextMarshaler(t reflect.Type) bool {
+	return t.Implements(textMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)
+}
+
+// implementsTextUnmarshaler 判断类型或其指针是否实现 encoding.TextUnmarshaler。
+func implementsTextUnmarshaler(t reflect.Type) bool {
+	return t.Implements(textUnmarshalerType) || reflect.PointerTo(t).Implements(textUnmarshalerType)
+}
+
+// setStructField 把一列字符串写入根结构体下的叶子字段。
+func setStructField(root reflect.Value, f fieldSpec, raw string, rowNum int, date1904 bool) error {
 	if raw == "" {
 		if f.required {
 			return &RowError{Row: rowNum, Column: f.header, Err: errors.New("必填字段为空")}
 		}
 		return nil
+	}
+	dst, err := fieldByIndexAlloc(root, f.index)
+	if err != nil {
+		return &RowError{Row: rowNum, Column: f.header, Err: err}
 	}
 	holder := dst
 	if f.pointer {
@@ -319,7 +411,7 @@ func setStructField(dst reflect.Value, f fieldSpec, raw string, rowNum int, date
 	return nil
 }
 
-// parseFieldValue 把字符串解析到字段值。holder 可能是指针。
+// parseFieldValue 把字符串解析到叶子字段。holder 可能是指针。
 func parseFieldValue(holder reflect.Value, f fieldSpec, raw string, date1904 bool) error {
 	value := holder
 	if value.Kind() == reflect.Pointer {
@@ -334,6 +426,14 @@ func parseFieldValue(holder reflect.Value, f fieldSpec, raw string, date1904 boo
 		}
 		value.Set(reflect.ValueOf(t))
 		return nil
+	}
+	if value.CanAddr() {
+		if unmarshaler, ok := value.Addr().Interface().(encoding.TextUnmarshaler); ok {
+			if err := unmarshaler.UnmarshalText([]byte(text)); err != nil {
+				return fmt.Errorf("值 %q 无法解析为 %s: %w", truncate(raw, 64), f.typ, err)
+			}
+			return nil
+		}
 	}
 
 	switch f.typ.Kind() {
@@ -383,7 +483,18 @@ func parseTimeValue(text, layout string, date1904 bool) (time.Time, error) {
 	return excelize.ExcelDateToTime(serial, date1904)
 }
 
-// formatField 把一个字段值写成字符串。
+// formatStructField 从根结构体按路径取出叶子字段并格式化。
+//
+// 嵌套指针为 nil 时返回空字符串，表示整组子列都写空单元格。
+func formatStructField(root reflect.Value, f fieldSpec) (string, error) {
+	value, ok := fieldByIndex(root, f.index)
+	if !ok {
+		return "", nil
+	}
+	return formatField(value, f)
+}
+
+// formatField 把一个叶子字段值写成字符串。
 func formatField(value reflect.Value, f fieldSpec) (string, error) {
 	if f.pointer {
 		if value.IsNil() {
@@ -393,6 +504,13 @@ func formatField(value reflect.Value, f fieldSpec) (string, error) {
 	}
 	if f.typ == timeType {
 		return value.Interface().(time.Time).Format(f.layout), nil
+	}
+	if marshaler, ok := textMarshalerValue(value); ok {
+		text, err := marshaler.MarshalText()
+		if err != nil {
+			return "", fmt.Errorf("值无法序列化为文本: %w", err)
+		}
+		return string(text), nil
 	}
 	switch f.typ.Kind() {
 	case reflect.String:
@@ -410,4 +528,65 @@ func formatField(value reflect.Value, f fieldSpec) (string, error) {
 	default:
 		return "", fmt.Errorf("不支持的字段类型 %s", f.typ)
 	}
+}
+
+// textMarshalerValue 取出字段值上的 TextMarshaler，兼容值/指针接收者。
+func textMarshalerValue(value reflect.Value) (encoding.TextMarshaler, bool) {
+	if value.IsValid() && value.CanInterface() {
+		if marshaler, ok := value.Interface().(encoding.TextMarshaler); ok {
+			return marshaler, true
+		}
+	}
+	if value.IsValid() && value.CanAddr() {
+		if marshaler, ok := value.Addr().Interface().(encoding.TextMarshaler); ok {
+			return marshaler, true
+		}
+	}
+	if value.IsValid() && value.Kind() != reflect.Pointer {
+		copyValue := reflect.New(value.Type()).Elem()
+		copyValue.Set(value)
+		if marshaler, ok := copyValue.Addr().Interface().(encoding.TextMarshaler); ok {
+			return marshaler, true
+		}
+	}
+	return nil, false
+}
+
+// fieldByIndex 按路径取字段；嵌套指针为 nil 时返回 false。
+func fieldByIndex(root reflect.Value, path []int) (reflect.Value, bool) {
+	value := root
+	for _, index := range path {
+		if value.Kind() == reflect.Pointer {
+			if value.IsNil() {
+				return reflect.Value{}, false
+			}
+			value = value.Elem()
+		}
+		if value.Kind() != reflect.Struct || index < 0 || index >= value.NumField() {
+			return reflect.Value{}, false
+		}
+		value = value.Field(index)
+	}
+	return value, true
+}
+
+// fieldByIndexAlloc 按路径取字段，并在遇到 nil 中间指针时分配。
+func fieldByIndexAlloc(root reflect.Value, path []int) (reflect.Value, error) {
+	value := root
+	for _, index := range path {
+		if value.Kind() == reflect.Pointer {
+			if value.IsNil() {
+				if value.Type().Elem().Kind() != reflect.Struct {
+					return reflect.Value{}, errors.New("嵌套字段路径不是结构体")
+				}
+				value.Set(reflect.New(value.Type().Elem()))
+			}
+			value = value.Elem()
+		}
+		if value.Kind() != reflect.Struct || index < 0 || index >= value.NumField() {
+			return reflect.Value{}, errors.New("嵌套字段路径无效")
+		}
+		value = value.Field(index)
+	}
+	return value, nil
 }
