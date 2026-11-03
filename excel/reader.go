@@ -84,7 +84,29 @@ func openWorkbookFile(path string) (*excelize.File, error) {
 	return f, nil
 }
 
-// resolveSheet 返回要操作的工作表名：空名取第一个，否则校验存在性。
+// Open 从流打开工作簿。
+//
+// 注意：Excelize 的 OpenReader 会把整个流读入内存；大文件请用 OpenFile。
+// 返回的 Reader 必须 Close。
+func Open(r io.Reader) (*Reader, error) {
+	f, err := openWorkbook(r)
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{file: f}, nil
+}
+
+// OpenFile 从文件路径打开工作簿，不把整个文件读入内存。
+func OpenFile(path string) (*Reader, error) {
+	f, err := openWorkbookFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{file: f}, nil
+}
+
+// resolveSheet 返回规范工作表名：空名取第一个，否则按 Excelize 的大小写
+// 不敏感规则查找并返回工作簿里的名字。
 func resolveSheet(f *excelize.File, name string) (string, error) {
 	if name == "" {
 		first := f.GetSheetName(0)
@@ -97,96 +119,160 @@ func resolveSheet(f *excelize.File, name string) (string, error) {
 	if err != nil || idx < 0 {
 		return "", fmt.Errorf("%w: %s", ErrSheetNotFound, name)
 	}
-	return name, nil
+	canonical := f.GetSheetName(idx)
+	if canonical == "" {
+		return "", fmt.Errorf("%w: %s", ErrSheetNotFound, name)
+	}
+	return canonical, nil
 }
+
+// Close 释放底层工作簿。幂等；关闭后读取操作返回 ErrClosed。
+func (r *Reader) Close() error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	return r.file.Close()
+}
+
+// check 在读取前确认 Reader 尚未关闭。
+func (r *Reader) check() error {
+	if r.closed {
+		return ErrClosed
+	}
+	return nil
+}
+
+// Sheets 按工作簿顺序返回全部 sheet 条目。
+//
+// 关闭后返回 ErrClosed；读取可见性失败时返回底层错误。
+func (r *Reader) Sheets() ([]SheetInfo, error) {
+	if err := r.check(); err != nil {
+		return nil, err
+	}
+	names := r.file.GetSheetList()
+	infos := make([]SheetInfo, 0, len(names))
+	for _, name := range names {
+		idx, err := r.file.GetSheetIndex(name)
+		if err != nil {
+			return nil, err
+		}
+		visible, err := r.file.GetSheetVisible(name)
+		if err != nil {
+			return nil, err
+		}
+		infos = append(infos, SheetInfo{Name: name, Index: idx, Visible: visible})
+	}
+	return infos, nil
+}
+
+// Sheet 返回指定工作表的读取句柄；name 为空时取第一个。
+//
+// 关闭后返回 ErrClosed；工作簿没有 sheet 返回 ErrEmptySheet；名字不存在
+// 返回 ErrSheetNotFound。
+func (r *Reader) Sheet(name string) (*SheetReader, error) {
+	if err := r.check(); err != nil {
+		return nil, err
+	}
+	sheet, err := resolveSheet(r.file, name)
+	if err != nil {
+		return nil, err
+	}
+	idx, err := r.file.GetSheetIndex(sheet)
+	if err != nil {
+		return nil, err
+	}
+	visible, err := r.file.GetSheetVisible(sheet)
+	if err != nil {
+		return nil, err
+	}
+	return &SheetReader{
+		reader: r,
+		name:   sheet,
+		info:   SheetInfo{Name: sheet, Index: idx, Visible: visible},
+	}, nil
+}
+
+// date1904For 按需读取并缓存工作簿的 1904 日期系统标记。
+func (r *Reader) date1904For(need bool) (bool, error) {
+	if !need {
+		return false, nil
+	}
+	if !r.propsLoaded {
+		props, err := r.file.GetWorkbookProps()
+		if err != nil {
+			return false, err
+		}
+		r.date1904 = props.Date1904 != nil && *props.Date1904
+		r.propsLoaded = true
+	}
+	return r.date1904, nil
+}
+
+// Info 返回创建句柄时缓存的工作表信息，Reader 关闭后仍可读取。
+func (s *SheetReader) Info() SheetInfo { return s.info }
 
 // Read 读取整张工作表并返回按行排列的结果。
 //
 // 每个 map 的键来自 Column.Key；声明之外的多余列忽略，声明的列在表头中
 // 不存在时返回 ErrMissingColumn。空行会被跳过，但行号继续推进。
-// 读取过程中的行级错误以 *RowError 返回；校验回调返回 ErrStop 时返回已经
-// 收集到的行与 nil。
-func Read(r io.Reader, opts ReadOptions) ([]map[string]string, error) {
-	return readAll(func() (*excelize.File, error) { return openWorkbook(r) }, opts)
-}
-
-// ReadFile 从文件路径读取整张工作表。
-//
-// 与 Read 的区别是走 Excelize 的 OpenFile 路径，不把整个文件读入内存；
-// 大文件优先使用本函数。扩展名与文件魔数都会校验。
-func ReadFile(path string, opts ReadOptions) ([]map[string]string, error) {
-	return readAll(func() (*excelize.File, error) { return openWorkbookFile(path) }, opts)
-}
-
-// ReadEach 逐行读取并回调，不把全部数据行保留在内存。
-//
-// 注意：io.Reader 入口沿用 Excelize 的 OpenReader，它会把整个流读入内存；
-// 真正的大文件请用 ReadEachFile。fn 收到的 rowNum 是 Excel 物理行号
-// （1-based，含表头与跳过行）；返回 ErrStop 表示成功提前结束，返回其他错误
-// 会以 *RowError 包装。每次回调的 map 都是新分配的，回调返回后归调用方所有。
-func ReadEach(r io.Reader, opts ReadOptions, fn func(rowNum int, row map[string]string) error) error {
-	return readEach(func() (*excelize.File, error) { return openWorkbook(r) }, opts, fn)
-}
-
-// ReadEachFile 从文件路径逐行读取，是大文件的首选入口。
-//
-// 走 Excelize 的 OpenFile 路径，文件不整体读入内存；其余语义同 ReadEach。
-func ReadEachFile(path string, opts ReadOptions, fn func(rowNum int, row map[string]string) error) error {
-	return readEach(func() (*excelize.File, error) { return openWorkbookFile(path) }, opts, fn)
-}
-
-// readAll 收集 ReadEach 的结果。
-func readAll(open func() (*excelize.File, error), opts ReadOptions) ([]map[string]string, error) {
+// 校验回调返回 ErrStop 时返回已收集的行与 nil；Reader 已关闭时返回 ErrClosed。
+// 行级错误以 *RowError 返回。
+func (s *SheetReader) Read(opts ReadOptions) ([]map[string]string, error) {
 	var out []map[string]string
-	if err := readEach(open, opts, func(_ int, row map[string]string) error {
+	err := s.read(opts, false, func(_ int, row map[string]string, _ bool) error {
 		out = append(out, row)
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// rowFunc 是内部行回调，额外携带工作簿的 1904 日期系统标记。
-type rowFunc func(rowNum int, row map[string]string, date1904 bool) error
-
-// readEach 打开工作簿并交给 readRows。
-func readEach(open func() (*excelize.File, error), opts ReadOptions, fn func(int, map[string]string) error) error {
-	return readEachRows(open, opts, func(rowNum int, row map[string]string, _ bool) error {
+// Each 逐行读取并回调，不把全部数据行保留在内存。
+//
+// rowNum 是 Excel 物理行号（1-based，含表头与跳过行）；返回 ErrStop 表示
+// 成功提前结束，其他错误会以 *RowError 包装；Reader 已关闭时返回 ErrClosed。
+func (s *SheetReader) Each(opts ReadOptions, fn func(rowNum int, row map[string]string) error) error {
+	return s.read(opts, false, func(rowNum int, row map[string]string, _ bool) error {
 		return fn(rowNum, row)
 	})
 }
 
-// readEachRows 与 readEach 相同，但把 1904 标记传给回调。
-func readEachRows(open func() (*excelize.File, error), opts ReadOptions, fn rowFunc) error {
+// read 是 Read/Each 的公共实现。
+func (s *SheetReader) read(opts ReadOptions, forceDate1904 bool, fn rowFunc) error {
+	if err := s.reader.check(); err != nil {
+		return err
+	}
 	cols, err := prepareRead(opts)
 	if err != nil {
 		return err
 	}
-	f, err := open()
+	need := forceDate1904 || hasDateType(cols)
+	date1904, err := s.reader.date1904For(need)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	sheet, err := resolveSheet(f, opts.Sheet)
-	if err != nil {
-		return err
-	}
-	props, err := f.GetWorkbookProps()
-	if err != nil {
-		return err
-	}
-	date1904 := props.Date1904 != nil && *props.Date1904
-	return readRows(f, sheet, opts, cols, date1904, fn)
+	return readRows(s.reader.file, s.name, opts, cols, date1904, fn)
 }
+
+// hasDateType 判断列声明里是否有需要 1904 标记的日期类型。
+func hasDateType(cols []Column) bool {
+	for _, c := range cols {
+		if isDateType(c.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+// rowFunc 是内部行回调，额外携带工作簿的 1904 日期系统标记。
+type rowFunc func(rowNum int, row map[string]string, date1904 bool) error
 
 // prepareRead 校验选项并返回填充过 Key 的列声明。
 func prepareRead(opts ReadOptions) ([]Column, error) {
-	if err := opts.validate(); err != nil {
-		return nil, err
-	}
-	return normalizeColumns(opts.Columns)
+	return opts.prepare()
 }
 
 // readRows 逐行读取并交给 fn，负责表头解析、空行跳过与行号维护。
@@ -237,6 +323,11 @@ func readRows(f *excelize.File, sheet string, opts ReadOptions, cols []Column, d
 		if cErr != nil {
 			return cErr
 		}
+		if opts.TrimSpace {
+			for i := range cells {
+				cells[i] = strings.TrimSpace(cells[i])
+			}
+		}
 		if opts.NoHeader {
 			if len(cells) > len(cols) {
 				return fmt.Errorf("%w: 第 %d 行有 %d 列，声明 %d 列", ErrColumnMismatch, rowNum, len(cells), len(cols))
@@ -255,9 +346,6 @@ func readRows(f *excelize.File, sheet string, opts ReadOptions, cols []Column, d
 			value := ""
 			if idx := indexes[i]; idx >= 0 && idx < len(cells) {
 				value = cells[idx]
-			}
-			if opts.TrimSpace {
-				value = strings.TrimSpace(value)
 			}
 			if value == "" {
 				if c.Required {

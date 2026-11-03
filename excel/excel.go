@@ -2,7 +2,8 @@
 //
 // 包只做一条链路：调用方声明要哪些列，包负责按声明取值、校验、规范化并
 // 输出。读取结果默认是 []map[string]string，列声明里的 Key 就是 map 的键；
-// 需要 Go 类型时用 ReadInto/WriteFrom 把行映射到结构体。
+// 需要 Go 类型时用 SheetReader.ReadInto/EachInto 读结构体，用
+// Builder.WriteFrom/AddSheetFrom 写结构体。
 //
 // 三条固定语义：
 //
@@ -14,14 +15,17 @@
 // 支持的格式是 xlsx/xlsm/xltx/xltm（ZIP 容器）。旧版 .xls、csv、加密工作簿
 // 会返回 ErrUnsupportedFormat，不做格式转换。
 //
-// 全量 API（Read/Write）与流式 API（ReadEach/ReadEachFile/Writer）共享同一套
-// 列声明和语义。
+// 读取用 Reader/SheetReader（Open/OpenFile → Sheet → Read/Each/ReadInto/
+// EachInto），写出用 Builder/SheetWriter（NewBuilder/NewFileBuilder →
+// AddSheet/AddSheetFrom → Write/WriteFrom → Close）；单 sheet 文件可以用
+// ReadFile/ReadFileInto/WriteFile/WriteFileFrom 一行入口。读写共享同一套列声明和语义。
 // 所有函数都不修改调用方传入的切片；返回的 map 由调用方独占。
 package excel
 
 import (
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -29,7 +33,7 @@ import (
 // ValueType 声明一列在读取时的校验与规范化方式。
 //
 // 它不改变输出类型：值始终是 string，类型只负责"能否解析 + 统一格式"。
-// 真正需要 int64、time.Time 等 Go 类型时，使用结构体层的 ReadInto。
+// 真正需要 int64、time.Time 等 Go 类型时，使用 SheetReader.ReadInto。
 type ValueType string
 
 const (
@@ -74,8 +78,6 @@ type Column struct {
 
 // ReadOptions 控制一次读取。
 type ReadOptions struct {
-	// Sheet 是工作表名；为空时使用第一个工作表。
-	Sheet string
 	// NoHeader 为 true 时首行即数据，列按位置对应；为 false 时按 Header 匹配表头。
 	NoHeader bool
 	// SkipRows 是表头/数据之前要跳过的物理行数，用于标题行、说明行；不能为负。
@@ -95,8 +97,6 @@ type ReadOptions struct {
 
 // WriteOptions 控制一次写出。
 type WriteOptions struct {
-	// Sheet 是工作表名；为空时使用 "Sheet1"。
-	Sheet string
 	// NoHeader 为 true 时不写表头行。
 	NoHeader bool
 	// Columns 声明写出的列顺序；不能为空，Key 必须唯一。
@@ -105,6 +105,71 @@ type WriteOptions struct {
 	HeaderBold bool
 	// FreezeHeader 为 true 且写出表头时冻结首行。
 	FreezeHeader bool
+}
+
+// SheetInfo 描述一个工作簿中的 sheet 条目。
+//
+// Index 是工作簿顺序（0-based）；Visible 为 false 表示隐藏或深度隐藏。
+// Excelize 没有公开的 sheet 类型判断，chart/dialog sheet 也可能出现在
+// Sheets 的返回列表里。
+type SheetInfo struct {
+	Name    string // 工作簿里的规范工作表名
+	Index   int    // 工作簿顺序，0-based
+	Visible bool   // 是否可见；隐藏/深度隐藏均为 false
+}
+
+// Reader 是只读工作簿句柄。
+//
+// 用 Open/OpenFile 创建，Close 释放底层工作簿。Reader 不是并发安全的；
+// 同一时刻只允许一个 SheetReader.Each/EachInto 在跑。关闭后除 SheetReader.Info
+// 外的读取操作返回 ErrClosed。
+type Reader struct {
+	file        *excelize.File
+	closed      bool
+	propsLoaded bool
+	date1904    bool
+}
+
+// SheetReader 是一张工作表的读取句柄。
+//
+// 由 Reader.Sheet 创建；Read/Each 返回或回调 map 行，ReadInto/EachInto 把行
+// 映射到结构体。Info 是缓存的工作表信息，Reader 关闭后仍可读取。
+type SheetReader struct {
+	reader *Reader
+	name   string
+	info   SheetInfo
+}
+
+// Builder 是工作簿写出器。
+//
+// 用 NewBuilder/NewFileBuilder 创建；AddSheet 返回 map 行的流式句柄，
+// AddSheetFrom 返回结构体的流式句柄。Close 提交整个工作簿，Abort 丢弃。
+// Builder 不是并发安全的；同一时刻只有一个活动 sheet。任一行写失败后进入
+// 失败态，只能 Abort。
+type Builder struct {
+	target   io.Writer
+	path     string
+	file     *excelize.File
+	sheets   int
+	added    []string
+	active   *SheetWriter
+	style    int
+	styleOk  bool
+	styleErr error
+	closed   bool
+	failed   error
+}
+
+// SheetWriter 是一个 sheet 的流式写出句柄。
+//
+// Write 按调用顺序追加行；Close 只 Flush 当前 sheet，幂等。Builder.Close
+// 会自动关闭未关闭的 sheet。
+type SheetWriter struct {
+	builder *Builder
+	stream  *excelize.StreamWriter
+	columns []Column
+	rowNum  int
+	closed  bool
 }
 
 // RowError 是带位置的读取/写出行级错误。
@@ -146,20 +211,42 @@ var (
 	ErrColumnMismatch = errors.New("excel: 无表头模式下声明列数与文件列宽不一致")
 	// ErrInvalidColumn 表示列声明或选项本身不合法。
 	ErrInvalidColumn = errors.New("excel: 列声明无效")
+	// ErrClosed 表示 Reader/Builder/SheetWriter 已经关闭或放弃。
+	ErrClosed = errors.New("excel: 已关闭")
+	// ErrSheetExists 表示要创建的工作表已经存在（大小写不敏感）。
+	ErrSheetExists = errors.New("excel: 工作表已存在")
+	// ErrEmptyWorkbook 表示 Builder 还没有添加任何 sheet。
+	ErrEmptyWorkbook = errors.New("excel: 工作簿没有工作表")
+	// ErrInvalidSheetName 表示工作表名不符合 Excel 规则。
+	ErrInvalidSheetName = errors.New("excel: 工作表名无效")
 	// ErrMissingKey 表示写出的数据行缺少声明的键。
 	ErrMissingKey = errors.New("excel: 数据行缺少声明的键")
 	// ErrStop 由校验回调返回，表示成功的提前结束，不是错误。
 	ErrStop = errors.New("excel: 停止读取")
 )
 
-// normalizeColumns 填充 Key 并校验列声明，返回可安全使用的副本。
+// normalizeColumns 填充 Key 并校验写出列声明，返回可安全使用的副本。
 func normalizeColumns(cols []Column) ([]Column, error) {
+	return normalize(cols, true, false)
+}
+
+// normalizeReadColumns 是读取路径的列规范化：清洗 Header、填默认 Key，
+// 不校验 Width（Width 只作用于写出）。
+func normalizeReadColumns(cols []Column) ([]Column, error) {
+	return normalize(cols, false, true)
+}
+
+// normalize 是读写共用的列规范化实现。
+func normalize(cols []Column, checkWidth, cleanHeaders bool) ([]Column, error) {
 	if len(cols) == 0 {
 		return nil, fmt.Errorf("%w: 未声明任何列", ErrInvalidColumn)
 	}
 	out := make([]Column, len(cols))
 	seen := make(map[string]struct{}, len(cols))
 	for i, c := range cols {
+		if cleanHeaders {
+			c.Header = cleanHeader(c.Header)
+		}
 		if c.Key == "" {
 			c.Key = c.Header
 		}
@@ -181,7 +268,7 @@ func normalizeColumns(cols []Column) ([]Column, error) {
 			return nil, fmt.Errorf("%w: 列 %q 的类型 %q 未知", ErrInvalidColumn, c.Key, c.Type)
 		}
 
-		if c.Width < 0 || c.Width > excelize.MaxColumnWidth {
+		if checkWidth && (c.Width < 0 || c.Width > excelize.MaxColumnWidth) {
 			return nil, fmt.Errorf("%w: 列 %q 的宽度 %.2f 超出范围", ErrInvalidColumn, c.Key, c.Width)
 		}
 		out[i] = c
@@ -194,39 +281,45 @@ func isDateType(t ValueType) bool {
 	return t == Date || t == DateTime || t == Time
 }
 
-// validate 校验读取选项，必须在打开工作簿之前调用。
-func (o ReadOptions) validate() error {
+// prepare 校验读取选项并返回规范化后的列声明。
+func (o ReadOptions) prepare() ([]Column, error) {
 	if o.SkipRows < 0 {
-		return fmt.Errorf("%w: SkipRows 不能为负", ErrInvalidColumn)
+		return nil, fmt.Errorf("%w: SkipRows 不能为负", ErrInvalidColumn)
 	}
-	cols, err := normalizeColumns(o.Columns)
+	cols, err := normalizeReadColumns(o.Columns)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	seenHeader := make(map[string]struct{}, len(cols))
 	for _, c := range cols {
 		if isDateType(c.Type) && !o.RawValues {
-			return fmt.Errorf("%w: 列 %q 是日期类型，必须设置 RawValues", ErrInvalidColumn, c.Key)
+			return nil, fmt.Errorf("%w: 列 %q 是日期类型，必须设置 RawValues", ErrInvalidColumn, c.Key)
 		}
 		if o.NoHeader {
 			continue
 		}
 		if c.Header == "" {
-			return fmt.Errorf("%w: 列 %q 缺少 Header", ErrInvalidColumn, c.Key)
+			return nil, fmt.Errorf("%w: 列 %q 缺少 Header", ErrInvalidColumn, c.Key)
 		}
 		if _, ok := seenHeader[c.Header]; ok {
-			return fmt.Errorf("%w: 表头 %q 重复", ErrInvalidColumn, c.Header)
+			return nil, fmt.Errorf("%w: 表头 %q 重复", ErrInvalidColumn, c.Header)
 		}
 		seenHeader[c.Header] = struct{}{}
 	}
-	return nil
+	return cols, nil
 }
 
-// validate 校验写出选项，必须在创建工作簿之前调用。
-func (o WriteOptions) validate() error {
+// validate 校验读取选项；语义与 prepare 一致（丢弃列返回值）。
+func (o ReadOptions) validate() error {
+	_, err := o.prepare()
+	return err
+}
+
+// prepare 校验写出选项并返回规范化后的列声明。
+func (o WriteOptions) prepare() ([]Column, error) {
 	cols, err := normalizeColumns(o.Columns)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	seenHeader := make(map[string]struct{}, len(cols))
 	for _, c := range cols {
@@ -235,9 +328,15 @@ func (o WriteOptions) validate() error {
 			header = c.Key
 		}
 		if _, ok := seenHeader[header]; ok {
-			return fmt.Errorf("%w: 写出的表头 %q 重复", ErrInvalidColumn, header)
+			return nil, fmt.Errorf("%w: 写出的表头 %q 重复", ErrInvalidColumn, header)
 		}
 		seenHeader[header] = struct{}{}
 	}
-	return nil
+	return cols, nil
+}
+
+// validate 校验写出选项；语义与 prepare 一致（丢弃列返回值）。
+func (o WriteOptions) validate() error {
+	_, err := o.prepare()
+	return err
 }

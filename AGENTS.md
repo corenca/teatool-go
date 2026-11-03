@@ -43,13 +43,19 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   不做流式/大文件。
 - `excel/`：声明式 xlsx 读写（xlsx/xlsm/xltx/xltm，不支持 `.xls`/csv/加密文件）。
   `Column{Header, Key, Type, Layout, Required, Width}` 是唯一列声明，map 层返回
-  `[]map[string]string`，结构体层用 `ReadInto[T]`/`WriteFrom[T]`。读取严格按声明：
-  多余列忽略，缺列报错；无表头模式声明列数必须等于文件实际列宽。值统一 string，
-  `Type` 只做校验与规范化，map 层的日期类型必须 `RawValues=true`（取序列号）；
-  结构体层 `time.Time` 先按序列号、失败再按 layout 解析，两种来源都能读。写出每行必须
-  包含全部声明 Key，缺一个报 `*RowError`（`ErrMissingKey`）；以 `=` 开头的值按文本
-  写。全量入口 `Read`/`Write` 与流式入口 `ReadEach`/`ReadEachFile`/`Writer` 共享同一套语义；行级
-  错误带 Excel 物理行号。文件只做 xlsx，扩展名与 ZIP 魔数双重校验。
+  `[]map[string]string`，结构体层用 `SheetReader.ReadInto[T]`/`EachInto[T]` 读，
+  `Builder.WriteFrom[T]`/`AddSheetFrom[T]` 写（后者返回 `*StructSheetWriter[T]`
+  逐行 `Write`；Go 1.27 泛型方法与泛型类型）。读取用 `Reader`/`SheetReader`
+  （`Open`/`OpenFile` → `Sheet` → `Read`/`Each`/`ReadInto`/`EachInto`），写出用
+  `Builder`/`SheetWriter`（`NewBuilder`/`NewFileBuilder` → `AddSheet`/
+  `AddSheetFrom`/`AddSheetRows`/`WriteFrom` → `Close`/`Abort`）；单 sheet 文件另有
+  `ReadFile`/`ReadFileInto`/`WriteFile`/`WriteFileFrom`。读取严格按声明：多余列忽略，缺列报错；无表头模式声明列数必须
+  等于文件实际列宽。值统一 string，`Type` 只做校验与规范化，map 层的日期类型必须
+  `RawValues=true`（取序列号）；结构体层 `time.Time` 先按 layout、失败再按序列号
+  解析。写出每行必须包含全部声明 Key，缺一个报 `*RowError`（`ErrMissingKey`）；
+  以 `=` 开头的值按文本写。任一行写失败后 Builder 进入失败态，`Close` 返回原错误
+  且不落盘，只能 `Abort`。行级错误带 Excel 物理行号。文件只做 xlsx，扩展名与 ZIP
+  魔数双重校验。
 - `storage/`：对象存储 SPI（20 个方法：判存、读写（含区间与末尾 N 字节）、分片上传、
   磁盘上传下载、列举（含目录视图与流式 `Walk`）、批量/前缀删除、复制移动、预签名），
   零第三方依赖；`storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、
@@ -116,6 +122,7 @@ gofmt -l .                     # 提交前检查；有输出则 gofmt -w .
 
 - 测试放在外部测试包 `package batch_test`，通过 `batch.` 调用公开 API；不要改回 `package batch`。
 - 采用 TDD：先写失败测试，再实现。
+- **测试注释**：每个测试函数和表驱动用例都要用中文注释写明该用例的场景（输入、操作、期望结果）；表驱动的 `name` 要写清场景，不能只写 `case1`/`正常`。新增或修改的测试一律遵守，存量测试在后续改动时补齐。
 - 并发/取消相关测试必须能配合 `-race` 稳定通过，避免依赖过紧的时序断言。
 - **真实服务测试配置**：每个后端包的测试读同目录的 `<pkg>_test.json`（如
   `storage/s3/s3_test.json`），只把 `<pkg>_test.json.template` 入库，真实文件

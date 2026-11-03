@@ -1,276 +1,293 @@
 # excel
 
-面向业务的 xlsx 读写：声明要哪些列，包负责取值、校验、规范化；写出时按声明
-顺序生成表头与数据行。基于 [excelize v2](https://github.com/xuri/excelize)，支持
-xlsx / xlsm / xltx / xltm，不支持旧版 `.xls`、csv 与加密工作簿。
+面向业务的 xlsx 读写包：按列声明取值、校验与规范化，支持 map、结构体、多工作表与流式读写。
 
-## 安装
+- 只支持 xlsx/xlsm/xltx/xltm（ZIP 容器）；`.xls`、csv、加密工作簿返回 `ErrUnsupportedFormat`。
+- 值统一为 `string`；`Column.Type` 只做校验与规范化，不改变返回类型。
+- 读取严格按声明：多余列忽略，缺列报错；无表头模式下声明列数必须等于文件实际列宽。
+- 写出每行必须包含全部声明的 `Key`，缺一个报 `*RowError`（`ErrMissingKey`）。
+- 需要 Go 1.27+（结构体读写使用泛型方法与泛型类型）。
 
 ```bash
 go get github.com/corenca/teatool-go/excel
 ```
 
-## 快速开始
-
-### 有表头读取
+## 单 sheet 文件：一行入口
 
 ```go
-package main
-
-import (
-	"fmt"
-	"log"
-	"os"
-
-	"github.com/corenca/teatool-go/excel"
-)
-
-func main() {
-	f, err := os.Open("orders.xlsx")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
-
-	rows, err := excel.Read(f, excel.ReadOptions{
-		Columns: []excel.Column{
-			{Header: "订单号", Key: "order_no"},
-			{Header: "金额", Key: "amount", Type: excel.Float},
-		},
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	for _, row := range rows {
-		fmt.Println(row["order_no"], row["amount"])
-	}
+cols := []excel.Column{
+	{Header: "订单号", Key: "no"},
+	{Header: "金额", Key: "amount", Type: excel.Float},
 }
-```
 
-文件里的其他列会被忽略；声明的列在表头中不存在时返回 `ErrMissingColumn`，错误
-信息会一次列出所有缺失列。
-
-### 无表头读取
-
-无表头时 `Columns` 按位置对应 A、B、C…，`Header` 被忽略，**声明列数必须等于
-文件实际列宽**（所有数据行中最宽一行的有效单元格数）：
-
-```go
-rows, err := excel.Read(f, excel.ReadOptions{
-	NoHeader: true,
-	Columns: []excel.Column{
-		{Key: "order_no"},
-		{Key: "amount", Type: excel.Float},
-	},
-})
-```
-
-文件更宽或更窄都会返回 `ErrColumnMismatch`。
-
-### 写出
-
-```go
-out, err := os.Create("export.xlsx")
+rows, err := excel.ReadFile("in.xlsx", "订单", excel.ReadOptions{Columns: cols})
 if err != nil {
-	log.Fatal(err)
+	return err
 }
-defer out.Close()
 
-err = excel.Write(out, []map[string]string{
-	{"order_no": "A001", "amount": "12.5"},
-	{"order_no": "A002", "amount": ""},
-}, excel.WriteOptions{
-	Columns: []excel.Column{
-		{Header: "订单号", Key: "order_no", Width: 20},
-		{Header: "金额", Key: "amount", Width: 12},
-	},
-	HeaderBold:   true,
-	FreezeHeader: true,
+err = excel.WriteFile("out.xlsx", "订单", rows, excel.WriteOptions{
+	Columns:    cols,
+	HeaderBold: true,
 })
 ```
 
-每一行必须包含全部声明的 `Key`，缺一个就返回 `*RowError`（`ErrMissingKey`），
-且不会写出文件；多余键忽略；空字符串是合法值。以 `=` 开头的值按文本写入。
+`sheet == ""` 时读取第一个工作表；**写出必须给非空 sheet 名**，否则返回 `ErrInvalidSheetName`。
 
-需要写文件时用 `WriteFile`：它先写同目录临时文件再重命名，失败不会留下半截
-文件。
-
-### 结构体读写
+结构体版本：
 
 ```go
 type Order struct {
-	No     string     `excel:"订单号"`
-	Amount float64    `excel:"金额"`
-	Date   time.Time  `excel:"日期,layout:2006-01-02"`
-	Note   *string    `excel:"备注"`
-	Skip   string     `excel:"-"`
+	No     string  `excel:"订单号"`
+	Amount float64 `excel:"金额"`
 }
 
-// 读：列由字段与 tag 决定，不接受 opts.Columns
-orders, err := excel.ReadInto[Order](f, excel.ReadOptions{})
-
-// 写：字段声明顺序就是列顺序
-err = excel.WriteFrom(out, orders, excel.WriteOptions{HeaderBold: true})
+orders, err := excel.ReadFileInto[Order]("in.xlsx", "订单", excel.ReadOptions{})
+err = excel.WriteFileFrom("out.xlsx", "订单", orders, excel.WriteOptions{HeaderBold: true})
 ```
 
-结构体层支持 `string`、`bool`、各宽度 `int`/`uint`、`float32/64`、`time.Time`
-以及它们的一层指针。空单元格：普通字段取零值，指针字段为 `nil`，标了
-`required` 的字段报错。
+## 多 sheet：Reader / Builder
 
-### 流式读写
-
-大文件优先用文件路径入口，文件与数据行都不整体留在内存：
+读取：
 
 ```go
-// 流式读（文件路径）
-err := excel.ReadEachFile("big.xlsx", opts, func(rowNum int, row map[string]string) error {
-	if row["amount"] == "" {
+r, err := excel.OpenFile("in.xlsx")
+if err != nil {
+	return err
+}
+defer r.Close()
+
+infos, err := r.Sheets()
+for _, info := range infos {
+	fmt.Println(info.Name, info.Index, info.Visible)
+}
+
+s, err := r.Sheet("用户") // 大小写不敏感；空名取第一个
+if err != nil {
+	return err
+}
+rows, err := s.Read(excel.ReadOptions{Columns: cols})
+users, err := s.ReadInto[User](excel.ReadOptions{})
+```
+
+`Open(io.Reader)` 会把流读入内存；大文件用 `OpenFile`。`Reader` 不是并发安全的，同一时刻只读一个 sheet。`Close` 幂等；关闭后 `Sheets`/`Sheet`/`Read`/`Each`/`EachInto` 返回 `ErrClosed`，`Info()` 仍可读。
+
+读错误不会污染 Reader：A 表缺列报错后，仍可读 B 表或换声明重试 A 表。
+
+写出：
+
+```go
+b, err := excel.NewFileBuilder("out.xlsx") // 原子写，权限 0644
+if err != nil {
+	return err
+}
+defer b.Abort() // Close 成功后是 no-op
+
+if err := b.AddSheetRows("用户", rows, excel.WriteOptions{Columns: cols, HeaderBold: true}); err != nil {
+	return err
+}
+if err := b.WriteFrom("统计", stats, excel.WriteOptions{HeaderBold: true}); err != nil {
+	return err
+}
+return b.Close()
+```
+
+`NewBuilder(io.Writer)` 写入内存/网络流；`NewFileBuilder(path)` 写文件。`AddSheet` 返回流式句柄：
+
+```go
+sw, err := b.AddSheet("明细", excel.WriteOptions{Columns: cols})
+if err != nil {
+	return err
+}
+for _, row := range rows {
+	if err := sw.Write(row); err != nil {
+		return err // 失败后不要继续写，交给 defer b.Abort()
+	}
+}
+if err := sw.Close(); err != nil { // 只 Flush 当前 sheet
+	return err
+}
+```
+
+`AddSheet`/`AddSheetFrom`/`AddSheetRows`/`WriteFrom` 会自动结束上一个活动 sheet。`Builder.Close` 才写整个工作簿；`SheetWriter.Close`/`StructSheetWriter.Close` 只 Flush，且幂等。
+
+写失败后 Builder 进入失败态：`Close` 返回第一次失败的错误且不产出文件，只能 `Abort`。成功 `Close` 一次后再次 `Close` 返回 `ErrClosed`；无 sheet 时 `Close` 返回 `ErrEmptyWorkbook` 且不关闭，可以 `AddSheet` 后重试。
+
+## 流式结构体写出
+
+`AddSheetFrom[T]` 按字段 tag 生成列并返回泛型句柄，之后逐行 `Write`：
+
+```go
+sw, err := b.AddSheetFrom[User]("用户", excel.WriteOptions{HeaderBold: true})
+if err != nil {
+	return err
+}
+for _, u := range users {
+	if err := sw.Write(u); err != nil {
+		return err // 失败后不要继续写，交给 defer b.Abort()
+	}
+}
+if err := sw.Close(); err != nil { // 只 Flush 当前 sheet
+	return err
+}
+```
+
+- 列顺序、表头、`width` 来自字段 tag；不接受 `opts.Columns`。
+- `sw.Close` 只 Flush 当前 sheet；`Builder.Close` 会自动关闭未关闭的句柄。
+- `Builder.WriteFrom` 是“`AddSheetFrom` + 逐行 `Write` + `Close`”的批量封装。
+
+## 流式读取
+
+```go
+err := s.Each(excel.ReadOptions{Columns: cols}, func(rowNum int, row map[string]string) error {
+	if row["金额"] == "" {
 		return fmt.Errorf("第 %d 行金额为空", rowNum)
 	}
 	return nil
 })
-
-// 流式写
-w, err := excel.NewWriter(out, excel.WriteOptions{Columns: cols})
-if err != nil {
-	return err
-}
-for _, row := range data {
-	if err := w.Write(row); err != nil {
-		return err // 失败后丢弃 w，不要 Close
-	}
-}
-return w.Close()
 ```
 
-`ReadEachFile` 的回调返回 `excel.ErrStop` 表示成功提前结束；`ReadEach(io.Reader)`
-只避免保留全部数据行，Excelize 仍会把整个流读入内存。`Writer` 未 `Close` 时
-目标写入器不会收到文件；`Close` 之后不能再 `Write`。
+`rowNum` 是 Excel 物理行号（1-based，含表头与跳过行）。回调返回 `ErrStop` 表示成功提前结束；返回其他错误会包装成 `*RowError`。`Each` 不保留全部数据行；`OpenFile` 入口不把文件整体读入内存。
 
-## 列声明 `Column`
+结构体版本：
 
-| 字段 | 含义 |
-| --- | --- |
-| `Header` | Excel 表头文本。有表头读取时必填；无表头时忽略；写出为空时用 `Key` |
-| `Key` | 读取结果 map 的键，也是写出时取值的键；为空时读取/写出退化为 `Header` |
-| `Type` | 读取时的校验与规范化方式，默认 `Text`；写出时忽略 |
-| `Layout` | `Date`/`DateTime`/`Time` 的 Go 布局，如 `2006-01-02`；只用于输出 |
-| `Required` | 读取到空单元格时报 `*RowError`；写出时忽略 |
-| `Width` | 写出列宽（字符数），0 表示不设置，上限 255 |
+```go
+err := s.EachInto[User](excel.ReadOptions{}, func(rowNum int, u User) error {
+	t.Logf("第 %d 行: %+v", rowNum, u)
+	return nil
+})
+```
 
-`Key` 必须非空且唯一。`Type` 只能是 `Text`、`Int`、`Float`、`Bool`、`Date`、
-`DateTime`、`Time`；日期类必须给 `Layout`。
+`EachInto` 与 `ReadInto` 共用字段 tag、类型解析与 `Validate`，只是不保留完整 `[]T`。`ReadInto` 在语义上等于用 `EachInto` 收集全部结果。
 
-## `ReadOptions`
+## 列声明
 
 | 字段 | 含义 |
 | --- | --- |
-| `Sheet` | 工作表名；为空用第一个 |
-| `NoHeader` | `true` 时首行即数据，按位置对应 |
-| `SkipRows` | 表头/数据之前跳过的物理行数（标题行、说明行） |
-| `Columns` | 列声明，不能为空 |
-| `RawValues` | 取单元格原始值（日期为序列号、数字不带格式） |
-| `TrimSpace` | 去除数据单元格首尾空白；表头始终去 BOM 与空白 |
-| `Validate` | 逐行业务校验，返回 `ErrStop` 表示成功提前结束 |
+| `Header` | 表头文本；有表头读取时按它匹配，写出时为空则用 `Key` |
+| `Key` | 读取结果 map 的键、写出行取值的键；为空时用 `Header` |
+| `Type` | 读取校验与规范化方式，默认 `Text` |
+| `Layout` | `Date`/`DateTime`/`Time` 的输出布局；必填 |
+| `Required` | 读取时空单元格报 `*RowError` |
+| `Width` | 写出列宽，0 表示不设置；读取时忽略 |
 
-## `WriteOptions`
-
-| 字段 | 含义 |
-| --- | --- |
-| `Sheet` | 工作表名；为空用 `Sheet1` |
-| `NoHeader` | 不写表头行 |
-| `Columns` | 列声明，顺序即列顺序 |
-| `HeaderBold` | 表头加粗 |
-| `FreezeHeader` | 冻结首行（写表头时生效） |
-
-## 值的类型
-
-读取结果统一是 `string`，`Type` 只做校验与规范化，不改变返回类型：
-
-| Type | 接受 | 输出 |
+| `Type` | 输入 | 输出 |
 | --- | --- | --- |
 | `Text` | 任意文本 | 原样 |
-| `Int` | 十进制整数 | 无前导零的规范形式 |
-| `Float` | 浮点数 | 不使用科学计数法 |
-| `Bool` | `TRUE`/`FALSE`/`true`/`false`、原始值 `1`/`0` | `true`/`false` |
-| `Date`/`DateTime`/`Time` | Excel 日期序列号 | 按 `Layout` 输出 |
+| `Int` | 十进制整数 | 无前导零 |
+| `Float` | 浮点数 | 非科学计数法 |
+| `Bool` | `TRUE/FALSE`（大小写不敏感）、`1/0` | `true`/`false` |
+| `Date`/`DateTime`/`Time` | Excel 日期序列号 | 按 `Layout` |
 
-**日期列必须设置 `RawValues: true`**，否则装配期返回 `ErrInvalidColumn`。原因是
-一行单元格只能统一取格式化值或原始值：格式化文本取决于单元格自己的数字格式，
-靠它猜日期不可靠。开启后同一次读取的其他列也会拿到原始值（数字不带千分位、
-日期为序列号）。
+日期列必须同时设置 `RawValues: true`；同一次读取的其他列也会拿到原始值（数字不带格式）。`TrimSpace` 会去除数据单元格首尾空白，纯空格行按空行跳过。
 
-真实的数字精度由 Excel 决定：Excel 用 float64 存数字，超过 2^53 的整数在单元格
-里已经失真。`Int` 不会把它变成"精确的 int64"。身份证号、工号、前导零编号建议
-保持文本，不要声明成 `Int`。
+### 无表头
 
-## 行号与错误
+```go
+rows, err := s.Read(excel.ReadOptions{
+	NoHeader: true,
+	Columns: []excel.Column{
+		{Key: "col1"},
+		{Key: "col2"},
+	},
+})
+```
 
-行级错误统一是 `*RowError`，`Row` 是 Excel 物理行号（1-based，含 `SkipRows` 与
-表头行，空行也计数）：
+无表头时声明按位置对应 A、B、C；声明列数必须等于文件实际列宽（所有数据行中最宽一行的有效单元格数），否则 `ErrColumnMismatch`。
+
+## 结构体映射
+
+```go
+type User struct {
+	Name     string     `excel:"姓名"`
+	Age      *int       `excel:"年龄"` // 空单元格 → nil；0 → &0
+	Birthday *time.Time `excel:"生日,layout:2006-01-02"`
+	Skip     string     `excel:"-"`
+}
+```
+
+- tag 第一段是表头；没有 tag 时用字段名。
+- 选项：`layout:`（`time.Time` 必填）、`required`、`width:`；`excel:"-"` 跳过。
+- 支持 `string`、`bool`、各宽度 `int`/`uint`、`float32/64`、`time.Time` 以及它们的一层指针；其他类型装配期报 `ErrInvalidColumn`。
+- 结构体层不接受 `opts.Columns`；列由字段与 tag 决定。
+- `time.Time` 先按 `layout` 解析，失败再按 Excel 日期序列号解析；读真实日期单元格建议 `RawValues: true`。
+- 实现了 `Validate() error` 的值会在每行转换后调用。
+
+### 可空字段与零值
+
+可能为空的字段用一层指针：空单元格读成 `nil`，单元格里明确写着 `0` 或某个时间则读成非 `nil` 指针。
+
+```go
+if u.Age == nil {
+	// 空，不是 0
+} else if *u.Age == 0 {
+	// 明确写了 0
+}
+```
+
+写回同样按指针语义：`nil` 写空单元格，`&0` 写 `"0"`，`&time.Time{}` 写 `"0001-01-01 00:00:00"`。
+
+- `*string` 区分不了“空单元格”和“明确写了空字符串”，xlsx 层面两者相同。
+- `required` 与指针组合时空单元格仍报错。
+- 建议开启 `TrimSpace`，否则只含空格的数值单元格会被当成非空并解析失败。
+- 所有列都为空的行属于空行，会被跳过。
+
+## 工作表名
+
+`AddSheet`/`AddSheetRows`/`WriteFrom` 以及 `WriteFile`/`WriteFileFrom` 都要求非空名字，规则与 Excelize 一致：
+
+- 1–31 个 UTF-16 单元（emoji 算 2）；
+- 不含 `:\/?*[]`；
+- 首尾不能是单引号；
+- 大小写不敏感去重（`Foo` 与 `foo` 冲突）。
+
+重名返回 `ErrSheetExists`，非法名返回 `ErrInvalidSheetName`；这两种校验不污染 Builder，可以换名重试。
+
+读取时 `Reader.Sheet(name)` 沿用 Excelize 的大小写不敏感匹配，首尾空格有意义，不做 trim；`Info().Name` 返回工作簿里的规范名字。
+
+## 错误
+
+```go
+var (
+	ErrUnsupportedFormat
+	ErrSheetNotFound
+	ErrEmptySheet
+	ErrMissingColumn
+	ErrDuplicateColumn
+	ErrColumnMismatch
+	ErrInvalidColumn
+	ErrMissingKey
+	ErrStop
+	ErrClosed
+	ErrSheetExists
+	ErrEmptyWorkbook
+	ErrInvalidSheetName
+)
+```
+
+行级错误用 `*RowError`，含 Excel 物理行号与列名：
 
 ```go
 var rowErr *excel.RowError
 if errors.As(err, &rowErr) {
-	fmt.Printf("第 %d 行第 %s 列: %v\n", rowErr.Row, rowErr.Column, rowErr.Err)
+	fmt.Println(rowErr.Row, rowErr.Column)
 }
 ```
 
-空行会被跳过（不产生结果），但行号继续推进；文件中间整行缺失时，行号仍然对应
-Excel 里的物理行。
-
-## 结构体 tag
-
-```go
-excel:"表头名"
-excel:"表头名,layout:2006-01-02,required,width:20"
-excel:"-"
-```
-
-- 第一段是表头；为空时用字段名。
-- `layout:` 只对 `time.Time` 有意义，且必填。
-- `required` 时空单元格报错。
-- `width:` 是写出列宽。
-- 没有 tag 时用字段名作为表头。
-
-`time.Time` 字段读取时先尝试按 Excel 序列号解析，失败再按 `layout` 解析，所以
-既能读真实日期单元格（建议 `RawValues: true`），也能读本包写出的文本日期。
-写出时 `time.Time` 按 `layout` 写成文本。
-
-结构体层不接受 `opts.Columns`；列完全由字段与 tag 决定。支持一层指针用于可空
-字段；匿名字段、切片、map、结构体（除 `time.Time`）、多层指针都会在装配期返回
-`ErrInvalidColumn`，不会静默丢数据。
-
-## 错误与判断
-
-| 哨兵 | 场景 |
-| --- | --- |
-| `ErrUnsupportedFormat` | 不是 xlsx/xlsm/xltx/xltm（含 `.xls`、csv、加密文件） |
-| `ErrSheetNotFound` | 指定的工作表不存在 |
-| `ErrEmptySheet` | 空表，或有表头模式找不到表头行 |
-| `ErrMissingColumn` | 声明的列在表头中不存在 |
-| `ErrDuplicateColumn` | 列声明重复，或文件表头重复出现声明列 |
-| `ErrColumnMismatch` | 无表头模式下声明列数与文件列宽不一致 |
-| `ErrInvalidColumn` | 列声明、tag 或选项不合法 |
-| `ErrMissingKey` | 写出的数据行缺少声明的 Key |
-| `ErrStop` | 校验回调用于成功提前结束，不是错误 |
-
 ## 常见错误
 
-**日期列报 "必须设置 RawValues"**：给 `ReadOptions` 加 `RawValues: true`。
+- **缺列**：声明了文件里不存在的表头 → `ErrMissingColumn`。
+- **无表头列数不一致**：Excelize 会裁掉行尾空单元格；声明列数必须等于实际有效宽度。
+- **写出缺 Key**：每一行 map 必须包含全部声明 `Key`，空字符串是合法值。
+- **日期列报“必须设置 RawValues”**：加 `RawValues: true`。
+- **写侧 sheet 名为空**：写侧不做自动命名，给显式名字。
+- **Builder 失败后继续写**：任一行失败后只能 `Abort`；`Close` 返回原错误且不产出文件。
+- **读 `.xls` 不支持**：先转存为 xlsx。
+- **大文件内存高**：用 `OpenFile`/`Each`/`SheetWriter`；`Open(io.Reader)` 会把整个流读入内存。
 
-**无表头报列数不一致**：Excel 会裁掉行尾空单元格，`A1:C1` 里只有 A 有值时实际
-有效宽度是 1。声明列数必须与之相等。
+## 限制
 
-**写出报 "数据行缺少声明的键"**：每一行 map 都要包含全部声明的 `Key`，即使值
-为空字符串也要保留键。
-
-**读 `.xls` 报不支持**：Excelize 只支持 OOXML。先用 LibreOffice 或 Excel 转存为
-xlsx。
-
-**大文件内存高**：所有 `io.Reader` 入口（`Read`/`ReadEach`/`ReadInto`）都会
-经 Excelize `OpenReader` 把整个流读入内存；改用 `ReadFile`/`ReadFileInto`/
-`ReadEachFile` 走文件路径。
-
-**Excel 显示日期是文本**：本包写出统一按字符串写，日期以 `Layout` 文本落盘。
-需要真正的日期单元格时，请自行用 Excelize 写 `time.Time`。
+- 不支持在已有工作簿上追加/修改 sheet；只创建新工作簿。
+- 不支持并发写多个 sheet；一次只有一个活动 sheet。
+- 不做自动列宽、样式 DSL、图片/图表/批注/公式写入。
+- 合并单元格只有左上角有值；公式取缓存值。
+- `Sheets()` 可能包含 chart/dialog sheet（Excelize 没有公开的类型判断）；非 worksheet 上的 `Read/Each` 会由 Excelize 报错。

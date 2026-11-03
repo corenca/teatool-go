@@ -3,7 +3,6 @@ package excel
 import (
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
 	"strconv"
 	"strings"
@@ -19,7 +18,6 @@ var timeType = reflect.TypeFor[time.Time]()
 type fieldSpec struct {
 	index    int          // 字段在结构体中的下标
 	header   string       // Excel 表头名
-	key      string       // 内部映射键，取字段名
 	typ      reflect.Type // 字段类型；指针字段取元素类型
 	layout   string       // time.Time 的布局
 	required bool         // 空值是否报错
@@ -27,31 +25,41 @@ type fieldSpec struct {
 	pointer  bool         // 是否为指针字段
 }
 
-// ReadInto 把工作表映射成结构体切片。
+// ReadInto 把当前工作表读成结构体切片。
 //
-// 字段名是内部键，tag 的第一段是 Excel 表头；没有 tag 时用字段名。tag 选项
-// 支持 layout:（time.Time 必填）、required、width:，excel:"-" 表示跳过。
-// 支持 string、bool、各宽度 int/uint、float32/64、time.Time 以及它们的一层
-// 指针；其他类型在读取前返回 ErrInvalidColumn。
-//
-// 结构体层不接受 opts.Columns：列完全由字段与 tag 决定，传了会返回
-// ErrInvalidColumn。time.Time 字段先按 layout 解析，失败再按 Excel 日期序列号
-// 解析，因此既能读真实日期单元格（建议 RawValues=true），也能读本包写出的
-// 文本日期。实现了 Validate() error 的值会在每行转换后调用。
-func ReadInto[T any](r io.Reader, opts ReadOptions) ([]T, error) {
-	return readInto[T](func() (*excelize.File, error) { return openWorkbook(r) }, opts)
-}
-
-// ReadFileInto 与 ReadInto 相同，但从文件路径读取，走 OpenFile 路径。
-func ReadFileInto[T any](path string, opts ReadOptions) ([]T, error) {
-	return readInto[T](func() (*excelize.File, error) { return openWorkbookFile(path) }, opts)
-}
-
-// readInto 是 ReadInto 与 ReadFileInto 的公共实现。
-func readInto[T any](open func() (*excelize.File, error), opts ReadOptions) ([]T, error) {
-	typ, fields, err := prepareStruct[T](opts.Columns)
+// 字段与 tag 决定列；不接受 opts.Columns。T 只出现在返回值，调用时必须
+// 显式写 s.ReadInto[User](opts)。列/tag 无效返回 ErrInvalidColumn；Reader
+// 已关闭返回 ErrClosed；行级错误以 *RowError 返回。
+func (s *SheetReader) ReadInto[T any](opts ReadOptions) ([]T, error) {
+	var out []T
+	err := eachIntoSheet[T](s, opts, func(_ int, value T) error {
+		out = append(out, value)
+		return nil
+	})
 	if err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// EachInto 逐行读取并转换到结构体，不把全部结果保留在内存。
+//
+// 字段与 tag 决定列；不接受 opts.Columns。rowNum 是 Excel 物理行号
+// （1-based，含表头与跳过行）。回调返回 ErrStop 表示成功提前结束，其他
+// 错误会包装成 *RowError；结构体转换/Validate 错误也以 *RowError 返回。
+// Reader 已关闭返回 ErrClosed。fn 不能为 nil。
+func (s *SheetReader) EachInto[T any](opts ReadOptions, fn func(rowNum int, value T) error) error {
+	return eachIntoSheet[T](s, opts, fn)
+}
+
+// eachIntoSheet 是 ReadInto/EachInto 的公共实现。
+func eachIntoSheet[T any](s *SheetReader, opts ReadOptions, fn func(rowNum int, value T) error) error {
+	if err := s.reader.check(); err != nil {
+		return err
+	}
+	typ, fields, hasTime, err := prepareStruct[T](opts.Columns)
+	if err != nil {
+		return err
 	}
 	cols := make([]Column, len(fields))
 	for i, f := range fields {
@@ -60,96 +68,141 @@ func readInto[T any](open func() (*excelize.File, error), opts ReadOptions) ([]T
 	}
 	opts.Columns = cols
 
-	var out []T
-	onRow := func(rowNum int, row map[string]string, date1904 bool) error {
-		value := reflect.New(typ).Elem()
-		for _, f := range fields {
-			if err := setStructField(value.Field(f.index), f, row[f.header], rowNum, date1904); err != nil {
-				return err
-			}
+	return s.read(opts, hasTime, func(rowNum int, row map[string]string, date1904 bool) error {
+		value, err := decodeStructValue[T](typ, fields, row, rowNum, date1904)
+		if err != nil {
+			return err
 		}
-		if validator, ok := value.Addr().Interface().(interface{ Validate() error }); ok {
-			if err := validator.Validate(); err != nil {
-				return &RowError{Row: rowNum, Err: err}
-			}
-		}
-		out = append(out, value.Interface().(T))
-		return nil
-	}
-	if err := readEachRows(open, opts, onRow); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// WriteFrom 把结构体切片写成 xlsx。
-//
-// 字段声明顺序就是列顺序；表头与选项来自 tag。结构体层只写字符串：time.Time
-// 按 layout 格式化，指针为 nil 时写空单元格。不接受 opts.Columns。
-func WriteFrom[T any](w io.Writer, rows []T, opts WriteOptions) error {
-	return writeFrom(w, rows, opts)
-}
-
-// WriteFileFrom 与 WriteFrom 相同，但先写临时文件再重命名到 path。
-func WriteFileFrom[T any](path string, rows []T, opts WriteOptions) error {
-	return writeFileAtomic(path, func(w io.Writer) error {
-		return writeFrom(w, rows, opts)
+		return fn(rowNum, value)
 	})
 }
 
-// writeFrom 是 WriteFrom 与 WriteFileFrom 的公共实现。
-func writeFrom[T any](w io.Writer, rows []T, opts WriteOptions) error {
-	_, fields, err := prepareStruct[T](opts.Columns)
+// decodeStructValue 把一行 map 转换成结构体并执行 Validate。
+func decodeStructValue[T any](typ reflect.Type, fields []fieldSpec, row map[string]string, rowNum int, date1904 bool) (T, error) {
+	value := reflect.New(typ).Elem()
+	for _, f := range fields {
+		if err := setStructField(value.Field(f.index), f, row[f.header], rowNum, date1904); err != nil {
+			var zero T
+			return zero, err
+		}
+	}
+	if validator, ok := value.Addr().Interface().(interface{ Validate() error }); ok {
+		if err := validator.Validate(); err != nil {
+			var zero T
+			return zero, &RowError{Row: rowNum, Err: err}
+		}
+	}
+	return value.Interface().(T), nil
+}
+
+// StructSheetWriter 是绑定到具体结构体类型的 sheet 流式写出句柄。
+//
+// 由 Builder.AddSheetFrom 创建。Write 按字段 tag 格式化并追加一行；Close
+// 只 Flush 当前 sheet，幂等。Builder.Close 会自动关闭它。关闭后 Write 返回
+// ErrClosed；Builder 已失败且 sheet 未关闭时返回第一次失败的错误。
+type StructSheetWriter[T any] struct {
+	sheet  *SheetWriter
+	fields []fieldSpec
+}
+
+// AddSheetFrom 添加一个由结构体类型 T 决定列的工作表，并返回流式写出句柄。
+//
+// 列顺序、表头与宽度来自 T 的字段 tag；不接受 opts.Columns（非空返回
+// ErrInvalidColumn）。name 规则与 AddSheet 相同：非法名 ErrInvalidSheetName，
+// 重名 ErrSheetExists。T 的字段无效时返回 ErrInvalidColumn，且不污染 Builder。
+// 已有活动 sheet 时会先关闭它。
+func (b *Builder) AddSheetFrom[T any](name string, opts WriteOptions) (*StructSheetWriter[T], error) {
+	if err := b.check(); err != nil {
+		return nil, err
+	}
+	_, fields, _, err := prepareStruct[T](opts.Columns)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cols := make([]Column, len(fields))
 	for i, f := range fields {
-		cols[i] = Column{Header: f.header, Key: f.key, Width: f.width}
+		cols[i] = Column{Header: f.header, Key: f.header, Width: f.width}
 	}
 	opts.Columns = cols
 
-	writer, err := NewWriter(w, opts)
+	sw, err := b.AddSheet(name, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &StructSheetWriter[T]{sheet: sw, fields: fields}, nil
+}
+
+// Write 按字段 tag 格式化并追加一行。
+//
+// 单元格超长或底层 SetRow 失败返回 *RowError，并让 Builder 进入失败态。
+// 关闭后返回 ErrClosed；Builder 已失败且 sheet 未关闭时返回原错误。
+func (w *StructSheetWriter[T]) Write(value T) error {
+	if w.sheet.closed {
+		return ErrClosed
+	}
+	if err := w.sheet.builder.check(); err != nil {
+		return err
+	}
+
+	row := make(map[string]string, len(w.fields))
+	rv := reflect.ValueOf(value)
+	for _, f := range w.fields {
+		text, err := formatField(rv.Field(f.index), f)
+		if err != nil {
+			re := &RowError{Row: w.sheet.rowNum, Column: f.header, Err: err}
+			w.sheet.builder.fail(re)
+			return re
+		}
+		row[f.header] = text
+	}
+	return w.sheet.Write(row)
+}
+
+// Close 只 Flush 当前 sheet，幂等；语义同 SheetWriter.Close。
+func (w *StructSheetWriter[T]) Close() error {
+	return w.sheet.Close()
+}
+
+// WriteFrom 把结构体切片写入一个 sheet，成功后关闭该 sheet。
+//
+// 等价于 AddSheetFrom + 逐行 Write + Close；字段声明顺序就是列顺序，
+// 表头与选项来自 tag。time.Time 按 layout 格式化，指针为 nil 时写空单元格。
+// 不接受 opts.Columns（非空返回 ErrInvalidColumn）。错误同 AddSheetFrom/
+// StructSheetWriter.Write；失败后 Builder 进入失败态。
+func (b *Builder) WriteFrom[T any](name string, rows []T, opts WriteOptions) error {
+	w, err := b.AddSheetFrom[T](name, opts)
 	if err != nil {
 		return err
 	}
 	for i := range rows {
-		rowNum := i + 1
-		if !opts.NoHeader {
-			rowNum++
-		}
-		value := reflect.ValueOf(rows[i])
-		row := make(map[string]string, len(fields))
-		for _, f := range fields {
-			text, err := formatField(value.Field(f.index), f)
-			if err != nil {
-				writer.abort()
-				return &RowError{Row: rowNum, Column: f.header, Err: err}
-			}
-			row[f.key] = text
-		}
-		if err := writer.Write(row); err != nil {
-			writer.abort()
+		if err := w.Write(rows[i]); err != nil {
 			return err
 		}
 	}
-	return writer.Close()
+	return w.Close()
 }
 
 // prepareStruct 校验目标类型与 tag，并返回结构体类型与字段声明。
-func prepareStruct[T any](cols []Column) (reflect.Type, []fieldSpec, error) {
+func prepareStruct[T any](cols []Column) (reflect.Type, []fieldSpec, bool, error) {
 	if len(cols) > 0 {
-		return nil, nil, fmt.Errorf("%w: 结构体层不接受 Columns", ErrInvalidColumn)
+		return nil, nil, false, fmt.Errorf("%w: 结构体层不接受 Columns", ErrInvalidColumn)
 	}
 	typ := reflect.TypeFor[T]()
 	if typ.Kind() != reflect.Struct {
-		return nil, nil, fmt.Errorf("%w: 目标类型必须是结构体，实际是 %s", ErrInvalidColumn, typ)
+		return nil, nil, false, fmt.Errorf("%w: 目标类型必须是结构体，实际是 %s", ErrInvalidColumn, typ)
 	}
 	fields, err := structFields(typ)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
-	return typ, fields, nil
+	hasTime := false
+	for _, f := range fields {
+		if f.typ == timeType {
+			hasTime = true
+			break
+		}
+	}
+	return typ, fields, hasTime, nil
 }
 
 // structFields 解析结构体的全部导出字段。
@@ -186,7 +239,7 @@ func structFields(typ reflect.Type) ([]fieldSpec, error) {
 
 // parseFieldTag 解析 excel tag 与字段类型。
 func parseFieldTag(f reflect.StructField, index int, tag string) (fieldSpec, error) {
-	spec := fieldSpec{index: index, header: f.Name, key: f.Name, typ: f.Type}
+	spec := fieldSpec{index: index, header: f.Name, typ: f.Type}
 	parts := strings.Split(tag, ",")
 	if header := strings.TrimSpace(parts[0]); header != "" {
 		spec.header = header

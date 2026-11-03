@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,7 +128,7 @@ func TestReadHeader(t *testing.T) {
 		f.SetSheetRow("Sheet1", "A2", &[]any{"A001", "12.5", "x"})
 		f.SetSheetRow("Sheet1", "A3", &[]any{"A002", "", "y"})
 	})
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{
 		{Header: "订单号", Key: "order_no"},
 		{Header: "金额", Key: "amount"},
 	}})
@@ -151,7 +152,7 @@ func TestReadMissingColumns(t *testing.T) {
 	data := xlsxBytes(t, func(f *excelize.File) {
 		f.SetSheetRow("Sheet1", "A1", &[]any{"A", "B"})
 	})
-	_, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{
+	_, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{
 		{Header: "A"}, {Header: "C"}, {Header: "D"},
 	}})
 	t.Logf("err=%v", err)
@@ -168,7 +169,7 @@ func TestReadDuplicateFileHeader(t *testing.T) {
 	data := xlsxBytes(t, func(f *excelize.File) {
 		f.SetSheetRow("Sheet1", "A1", &[]any{"A", "A"})
 	})
-	_, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{{Header: "A"}}})
+	_, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{{Header: "A"}}})
 	if !errors.Is(err, excel.ErrDuplicateColumn) {
 		t.Fatalf("err=%v", err)
 	}
@@ -182,7 +183,7 @@ func TestReadSkipRows(t *testing.T) {
 		f.SetSheetRow("Sheet1", "A3", &[]any{"订单号", "金额"})
 		f.SetSheetRow("Sheet1", "A4", &[]any{"A001", "9"})
 	})
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{
 		SkipRows: 2,
 		Columns:  []excel.Column{{Header: "订单号", Key: "no"}, {Header: "金额", Key: "amt"}},
 	})
@@ -203,7 +204,7 @@ func TestReadTrimAndBOM(t *testing.T) {
 	})
 	col := excel.Column{Header: "订单号", Key: "no"}
 
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{col}})
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{col}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +213,7 @@ func TestReadTrimAndBOM(t *testing.T) {
 		t.Fatalf("got=%q", rows[0]["no"])
 	}
 
-	rows, err = excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{col}, TrimSpace: true})
+	rows, err = readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{col}, TrimSpace: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func TestReadRaggedRow(t *testing.T) {
 		f.SetSheetRow("Sheet1", "A1", &[]any{"A", "B"})
 		f.SetSheetRow("Sheet1", "A2", &[]any{"only-a"})
 	})
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{{Header: "A"}, {Header: "B"}}})
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{{Header: "A"}, {Header: "B"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,11 +242,11 @@ func TestReadRaggedRow(t *testing.T) {
 // TestReadEmptySheetAndMissingSheet 覆盖空表与不存在的工作表。
 func TestReadEmptySheetAndMissingSheet(t *testing.T) {
 	empty := xlsxBytes(t, func(f *excelize.File) {})
-	_, err := excel.Read(bytes.NewReader(empty), excel.ReadOptions{Columns: []excel.Column{{Header: "A"}}})
+	_, err := readAll(t, bytes.NewReader(empty), excel.ReadOptions{Columns: []excel.Column{{Header: "A"}}})
 	if !errors.Is(err, excel.ErrEmptySheet) {
 		t.Fatalf("empty: %v", err)
 	}
-	_, err = excel.Read(bytes.NewReader(empty), excel.ReadOptions{Sheet: "不存在", Columns: []excel.Column{{Header: "A"}}})
+	_, err = readAllSheet(t, bytes.NewReader(empty), "不存在", excel.ReadOptions{Columns: []excel.Column{{Header: "A"}}})
 	if !errors.Is(err, excel.ErrSheetNotFound) {
 		t.Fatalf("missing sheet: %v", err)
 	}
@@ -261,7 +262,7 @@ func TestReadFile(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := excel.ReadFile(path, excel.ReadOptions{Columns: []excel.Column{{Header: "h"}}})
+	rows, err := readPath(t, path, excel.ReadOptions{Columns: []excel.Column{{Header: "h"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +278,7 @@ func TestReadNoHeader(t *testing.T) {
 		f.SetSheetRow("Sheet1", "A1", &[]any{"A001", "12.5"})
 		f.SetSheetRow("Sheet1", "A2", &[]any{"A002", "13"})
 	})
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{
 		NoHeader: true,
 		Columns:  []excel.Column{{Key: "order_no"}, {Key: "amount"}},
 	})
@@ -296,7 +297,7 @@ func TestReadNoHeaderWidthMismatch(t *testing.T) {
 	wide := xlsxBytes(t, func(f *excelize.File) {
 		f.SetSheetRow("Sheet1", "A1", &[]any{"a", "b", "c"})
 	})
-	_, err := excel.Read(bytes.NewReader(wide), excel.ReadOptions{
+	_, err := readAll(t, bytes.NewReader(wide), excel.ReadOptions{
 		NoHeader: true,
 		Columns:  []excel.Column{{Key: "x"}, {Key: "y"}},
 	})
@@ -309,7 +310,7 @@ func TestReadNoHeaderWidthMismatch(t *testing.T) {
 	narrow := xlsxBytes(t, func(f *excelize.File) {
 		f.SetSheetRow("Sheet1", "A1", &[]any{"a", "", ""})
 	})
-	_, err = excel.Read(bytes.NewReader(narrow), excel.ReadOptions{
+	_, err = readAll(t, bytes.NewReader(narrow), excel.ReadOptions{
 		NoHeader: true,
 		Columns:  []excel.Column{{Key: "x"}, {Key: "y"}},
 	})
@@ -322,7 +323,7 @@ func TestReadNoHeaderWidthMismatch(t *testing.T) {
 // TestReadNoHeaderEmptySheet 确认空工作表在无表头模式下返回空结果。
 func TestReadNoHeaderEmptySheet(t *testing.T) {
 	empty := xlsxBytes(t, func(f *excelize.File) {})
-	rows, err := excel.Read(bytes.NewReader(empty), excel.ReadOptions{
+	rows, err := readAll(t, bytes.NewReader(empty), excel.ReadOptions{
 		NoHeader: true,
 		Columns:  []excel.Column{{Key: "x"}},
 	})
@@ -341,11 +342,11 @@ func TestReadTypedRaw(t *testing.T) {
 	col := excel.Column{Header: "日期", Key: "date", Type: excel.Date, Layout: "2006-01-02"}
 
 	// 未开 RawValues：装配期报错。
-	if _, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{col}}); !errors.Is(err, excel.ErrInvalidColumn) {
+	if _, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{col}}); !errors.Is(err, excel.ErrInvalidColumn) {
 		t.Fatalf("未开 RawValues: %v", err)
 	}
 
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{col}, RawValues: true})
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{col}, RawValues: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +366,7 @@ func TestRead1904(t *testing.T) {
 		f.SetSheetRow("Sheet1", "A1", &[]any{"日期"})
 		f.SetCellValue("Sheet1", "A2", 45292)
 	})
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{
 		RawValues: true,
 		Columns:   []excel.Column{{Header: "日期", Key: "date", Type: excel.Date, Layout: "2006-01-02"}},
 	})
@@ -390,7 +391,7 @@ func TestReadSparseTyped(t *testing.T) {
 		{Header: "金额", Key: "amount", Type: excel.Int},
 	}
 
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: base})
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: base})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +402,7 @@ func TestReadSparseTyped(t *testing.T) {
 
 	required := append([]excel.Column(nil), base...)
 	required[1].Required = true
-	_, err = excel.Read(bytes.NewReader(data), excel.ReadOptions{Columns: required})
+	_, err = readAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: required})
 	var rowErr *excel.RowError
 	t.Logf("Required=true err=%v", err)
 	if !errors.As(err, &rowErr) || rowErr.Row != 2 || rowErr.Column != "amount" {
@@ -415,7 +416,7 @@ func TestReadTypedError(t *testing.T) {
 		f.SetSheetRow("Sheet1", "A1", &[]any{"金额"})
 		f.SetSheetRow("Sheet1", "A2", &[]any{"abc"})
 	})
-	_, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{
+	_, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{
 		Columns: []excel.Column{{Header: "金额", Key: "amount", Type: excel.Int}},
 	})
 	var rowErr *excel.RowError
@@ -432,7 +433,7 @@ func TestReadBoolRaw(t *testing.T) {
 		f.SetCellValue("Sheet1", "A2", true)
 		f.SetCellValue("Sheet1", "A3", false)
 	})
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{
 		RawValues: true,
 		Columns:   []excel.Column{{Header: "有效", Key: "ok", Type: excel.Bool}},
 	})
@@ -454,7 +455,7 @@ func TestReadEachStop(t *testing.T) {
 		}
 	})
 	var seen []int
-	err := excel.ReadEach(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{{Header: "h"}}},
+	err := eachAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{{Header: "h"}}},
 		func(rowNum int, row map[string]string) error {
 			seen = append(seen, rowNum)
 			if len(seen) == 2 {
@@ -475,7 +476,7 @@ func TestReadValidateErrorHasRow(t *testing.T) {
 		f.SetSheetRow("Sheet1", "A2", &[]any{"ok"})
 		f.SetSheetRow("Sheet1", "A3", &[]any{"bad"})
 	})
-	_, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{
+	_, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{
 		Columns: []excel.Column{{Header: "h"}},
 		Validate: func(rowNum int, row map[string]string) error {
 			if row["h"] == "bad" {
@@ -499,7 +500,7 @@ func TestReadRowNumbersWithGaps(t *testing.T) {
 		f.SetCellValue("Sheet1", "A5", "r5")
 	})
 	var seen []int
-	err := excel.ReadEach(bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{{Header: "h"}}},
+	err := eachAll(t, bytes.NewReader(data), excel.ReadOptions{Columns: []excel.Column{{Header: "h"}}},
 		func(rowNum int, row map[string]string) error {
 			seen = append(seen, rowNum)
 			return nil
@@ -517,7 +518,7 @@ func TestReadStopReturnsCollected(t *testing.T) {
 		f.SetSheetRow("Sheet1", "A2", &[]any{"r1"})
 		f.SetSheetRow("Sheet1", "A3", &[]any{"r2"})
 	})
-	rows, err := excel.Read(bytes.NewReader(data), excel.ReadOptions{
+	rows, err := readAll(t, bytes.NewReader(data), excel.ReadOptions{
 		Columns: []excel.Column{{Header: "h"}},
 		Validate: func(rowNum int, row map[string]string) error {
 			if row["h"] == "r2" {
@@ -544,7 +545,7 @@ func TestReadEachFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var seen []string
-	err := excel.ReadEachFile(path, excel.ReadOptions{Columns: []excel.Column{{Header: "h"}}},
+	err := eachPath(t, path, excel.ReadOptions{Columns: []excel.Column{{Header: "h"}}},
 		func(rowNum int, row map[string]string) error {
 			seen = append(seen, row["h"])
 			return nil
@@ -553,4 +554,59 @@ func TestReadEachFile(t *testing.T) {
 	if err != nil || fmt.Sprint(seen) != "[v1 v2]" {
 		t.Fatalf("seen=%v err=%v", seen, err)
 	}
+}
+
+// readAll 是旧 Read 的测试辅助：打开第一个 sheet 并全量读取。
+func readAll(t *testing.T, r io.Reader, opts excel.ReadOptions) ([]map[string]string, error) {
+	t.Helper()
+	return readAllSheet(t, r, "", opts)
+}
+
+// readAllSheet 打开指定 sheet 并全量读取；sheet 为空取第一个。
+func readAllSheet(t *testing.T, r io.Reader, sheet string, opts excel.ReadOptions) ([]map[string]string, error) {
+	t.Helper()
+	rd, err := excel.Open(r)
+	if err != nil {
+		return nil, err
+	}
+	sh, err := rd.Sheet(sheet)
+	if err != nil {
+		return nil, errors.Join(err, rd.Close())
+	}
+	rows, err := sh.Read(opts)
+	return rows, errors.Join(err, rd.Close())
+}
+
+// readPath 打开文件第一个 sheet 并全量读取。
+func readPath(t *testing.T, path string, opts excel.ReadOptions) ([]map[string]string, error) {
+	t.Helper()
+	return excel.ReadFile(path, "", opts)
+}
+
+// eachAll 打开第一个 sheet 并逐行读取。
+func eachAll(t *testing.T, r io.Reader, opts excel.ReadOptions, fn func(int, map[string]string) error) error {
+	t.Helper()
+	rd, err := excel.Open(r)
+	if err != nil {
+		return err
+	}
+	sh, err := rd.Sheet("")
+	if err != nil {
+		return errors.Join(err, rd.Close())
+	}
+	return errors.Join(sh.Each(opts, fn), rd.Close())
+}
+
+// eachPath 打开文件第一个 sheet 并逐行读取。
+func eachPath(t *testing.T, path string, opts excel.ReadOptions, fn func(int, map[string]string) error) error {
+	t.Helper()
+	rd, err := excel.OpenFile(path)
+	if err != nil {
+		return err
+	}
+	sh, err := rd.Sheet("")
+	if err != nil {
+		return errors.Join(err, rd.Close())
+	}
+	return errors.Join(sh.Each(opts, fn), rd.Close())
 }

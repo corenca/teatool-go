@@ -3,6 +3,7 @@ package excel_test
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,10 +14,10 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-// TestWriteBasic 覆盖列顺序、表头、缺键忽略与多余键忽略。
+// TestWriteBasic 覆盖列顺序、表头、多余键忽略与尾部空单元格。
 func TestWriteBasic(t *testing.T) {
 	var buf bytes.Buffer
-	err := excel.Write(&buf, []map[string]string{
+	err := writeAll(t, &buf, "", []map[string]string{
 		{"order_no": "A001", "amount": "12.5", "extra": "忽略"},
 		{"order_no": "A002", "amount": ""},
 	}, excel.WriteOptions{Columns: []excel.Column{
@@ -48,7 +49,7 @@ func TestWriteBasic(t *testing.T) {
 // TestWriteMissingKey 确认缺声明键时报错且不输出文件。
 func TestWriteMissingKey(t *testing.T) {
 	var buf bytes.Buffer
-	err := excel.Write(&buf, []map[string]string{{"a": "1"}}, excel.WriteOptions{
+	err := writeAll(t, &buf, "", []map[string]string{{"a": "1"}}, excel.WriteOptions{
 		Columns: []excel.Column{{Key: "a"}, {Key: "b"}},
 	})
 	var rowErr *excel.RowError
@@ -64,7 +65,7 @@ func TestWriteMissingKey(t *testing.T) {
 // TestWriteNoHeader 确认不写表头。
 func TestWriteNoHeader(t *testing.T) {
 	var buf bytes.Buffer
-	if err := excel.Write(&buf, []map[string]string{{"a": "1"}}, excel.WriteOptions{
+	if err := writeAll(t, &buf, "", []map[string]string{{"a": "1"}}, excel.WriteOptions{
 		NoHeader: true,
 		Columns:  []excel.Column{{Header: "A", Key: "a"}},
 	}); err != nil {
@@ -80,7 +81,7 @@ func TestWriteNoHeader(t *testing.T) {
 // TestWriteFormulaLikeText 确认 = 开头按文本写入。
 func TestWriteFormulaLikeText(t *testing.T) {
 	var buf bytes.Buffer
-	if err := excel.Write(&buf, []map[string]string{{"v": "=1+1"}}, excel.WriteOptions{
+	if err := writeAll(t, &buf, "", []map[string]string{{"v": "=1+1"}}, excel.WriteOptions{
 		Columns: []excel.Column{{Header: "值", Key: "v"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -95,7 +96,7 @@ func TestWriteFormulaLikeText(t *testing.T) {
 // TestWriteLayout 确认列宽、冻结首行与表头加粗。
 func TestWriteLayout(t *testing.T) {
 	var buf bytes.Buffer
-	if err := excel.Write(&buf, []map[string]string{{"a": "1"}}, excel.WriteOptions{
+	if err := writeAll(t, &buf, "", []map[string]string{{"a": "1"}}, excel.WriteOptions{
 		Columns:      []excel.Column{{Header: "A", Key: "a", Width: 24}},
 		HeaderBold:   true,
 		FreezeHeader: true,
@@ -129,7 +130,7 @@ func TestWriteLayout(t *testing.T) {
 // TestWriteCellTooLong 确认超长单元格报行级错误。
 func TestWriteCellTooLong(t *testing.T) {
 	var buf bytes.Buffer
-	err := excel.Write(&buf, []map[string]string{{"v": strings.Repeat("x", excelize.TotalCellChars+1)}}, excel.WriteOptions{
+	err := writeAll(t, &buf, "", []map[string]string{{"v": strings.Repeat("x", excelize.TotalCellChars+1)}}, excel.WriteOptions{
 		Columns: []excel.Column{{Header: "值", Key: "v"}},
 	})
 	var rowErr *excel.RowError
@@ -145,12 +146,12 @@ func TestWriteCellTooLong(t *testing.T) {
 // TestWriteFile 确认写文件后可被 ReadFile 读回。
 func TestWriteFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.xlsx")
-	if err := excel.WriteFile(path, []map[string]string{{"a": "1"}}, excel.WriteOptions{
+	if err := excel.WriteFile(path, "Sheet1", []map[string]string{{"a": "1"}}, excel.WriteOptions{
 		Columns: []excel.Column{{Header: "A", Key: "a"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := excel.ReadFile(path, excel.ReadOptions{Columns: []excel.Column{{Header: "A", Key: "a"}}})
+	rows, err := excel.ReadFile(path, "", excel.ReadOptions{Columns: []excel.Column{{Header: "A", Key: "a"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,19 +164,26 @@ func TestWriteFile(t *testing.T) {
 	}
 }
 
-// TestWriterStreaming 覆盖流式写与关闭后的行为。
-func TestWriterStreaming(t *testing.T) {
+// TestSheetWriterStreaming 覆盖 SheetWriter 流式写与关闭后的行为。
+func TestSheetWriterStreaming(t *testing.T) {
 	var buf bytes.Buffer
-	w, err := excel.NewWriter(&buf, excel.WriteOptions{Columns: []excel.Column{{Header: "h", Key: "h"}}})
+	b, err := excel.NewBuilder(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sw, err := b.AddSheet("Sheet1", excel.WriteOptions{Columns: []excel.Column{{Header: "h", Key: "h"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := range 3 {
-		if err := w.Write(map[string]string{"h": string(rune('0' + i))}); err != nil {
+		if err := sw.Write(map[string]string{"h": string(rune('0' + i))}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := w.Close(); err != nil {
+	if err := sw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
 	got := readBack(t, buf.Bytes())
@@ -183,30 +191,36 @@ func TestWriterStreaming(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("got=%v", got)
 	}
-	if err := w.Write(map[string]string{"h": "x"}); err == nil {
-		t.Fatal("Close 后 Write 应报错")
+	if err := sw.Write(map[string]string{"h": "x"}); !errors.Is(err, excel.ErrClosed) {
+		t.Fatalf("Close 后 Write err=%v, want ErrClosed", err)
 	}
-	if err := w.Close(); err == nil {
-		t.Fatal("重复 Close 应报错")
+	if err := b.Close(); !errors.Is(err, excel.ErrClosed) {
+		t.Fatalf("重复 Close err=%v, want ErrClosed", err)
 	}
 }
 
-// TestWriterWithoutCloseWritesNothing 确认未 Close 不产生输出。
-func TestWriterWithoutCloseWritesNothing(t *testing.T) {
+// TestBuilderWithoutCloseWritesNothing 确认未 Close 不产生输出。
+func TestBuilderWithoutCloseWritesNothing(t *testing.T) {
 	var buf bytes.Buffer
-	if _, err := excel.NewWriter(&buf, excel.WriteOptions{Columns: []excel.Column{{Key: "h"}}}); err != nil {
+	b, err := excel.NewBuilder(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.AddSheet("Sheet1", excel.WriteOptions{Columns: []excel.Column{{Key: "h"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("未 Close 不应输出，len=%d", buf.Len())
+	}
+	if err := b.Abort(); err != nil {
+		t.Fatal(err)
 	}
 }
 
 // TestWriteSheetName 确认工作表名生效。
 func TestWriteSheetName(t *testing.T) {
 	var buf bytes.Buffer
-	if err := excel.Write(&buf, []map[string]string{{"a": "1"}}, excel.WriteOptions{
-		Sheet:   "数据",
+	if err := writeAll(t, &buf, "数据", []map[string]string{{"a": "1"}}, excel.WriteOptions{
 		Columns: []excel.Column{{Header: "A", Key: "a"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -239,7 +253,7 @@ func TestWriteFilePermissions(t *testing.T) {
 		t.Skip("Windows 不支持 POSIX 权限")
 	}
 	path := filepath.Join(t.TempDir(), "perm.xlsx")
-	if err := excel.WriteFile(path, []map[string]string{{"a": "1"}}, excel.WriteOptions{
+	if err := excel.WriteFile(path, "Sheet1", []map[string]string{{"a": "1"}}, excel.WriteOptions{
 		Columns: []excel.Column{{Header: "A", Key: "a"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -252,4 +266,21 @@ func TestWriteFilePermissions(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != 0o644 {
 		t.Fatalf("perm=%04o, want 0644", perm)
 	}
+}
+
+// writeAll 是旧 Write 的测试辅助：单 sheet 批量写。
+func writeAll(t *testing.T, w io.Writer, sheet string, rows []map[string]string, opts excel.WriteOptions) error {
+	t.Helper()
+	if sheet == "" {
+		sheet = "Sheet1"
+	}
+	b, err := excel.NewBuilder(w)
+	if err != nil {
+		return err
+	}
+	if err := b.AddSheetRows(sheet, rows, opts); err != nil {
+		b.Abort()
+		return err
+	}
+	return b.Close()
 }

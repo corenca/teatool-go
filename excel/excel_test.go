@@ -51,6 +51,7 @@ func TestReadOptionsValidate(t *testing.T) {
 		{"表头模式 Header 为空", excel.ReadOptions{Columns: []excel.Column{{Key: "a"}}}, excel.ErrInvalidColumn},
 		{"表头模式声明重复 Header", excel.ReadOptions{Columns: []excel.Column{{Header: "A", Key: "a"}, {Header: "A", Key: "b"}}}, excel.ErrInvalidColumn},
 		{"无表头模式只要求 Key", excel.ReadOptions{NoHeader: true, Columns: []excel.Column{{Key: "a"}}}, nil},
+		{"读取不校验 Width", excel.ReadOptions{Columns: []excel.Column{{Header: "A", Width: 999}}}, nil},
 	}
 	for _, c := range cases {
 		err := excel.ValidateReadOptionsForTest(c.opts)
@@ -71,6 +72,7 @@ func TestWriteOptionsValidate(t *testing.T) {
 		{"空声明", excel.WriteOptions{}, excel.ErrInvalidColumn},
 		{"重复表头", excel.WriteOptions{Columns: []excel.Column{{Header: "A", Key: "a"}, {Header: "A", Key: "b"}}}, excel.ErrInvalidColumn},
 		{"正常", excel.WriteOptions{Columns: []excel.Column{{Header: "A", Key: "a"}}}, nil},
+		{"写出校验 Width", excel.WriteOptions{Columns: []excel.Column{{Header: "A", Width: 999}}}, excel.ErrInvalidColumn},
 	}
 	for _, c := range cases {
 		err := excel.ValidateWriteOptionsForTest(c.opts)
