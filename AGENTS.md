@@ -58,6 +58,16 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   以 `=` 开头的值按文本写。任一行写失败后 Builder 进入失败态，`Close` 返回原错误
   且不落盘，只能 `Abort`。行级错误带 Excel 物理行号。文件只做 xlsx，扩展名与 ZIP
   魔数双重校验。
+- `tree/`：只读层级树。`Build([]T, Config[T,K])` 从扁平邻接表一次构建
+  `*Forest[T,K]`；节点 `Node[T]` 只存 `Value`/`Children`（ID/ParentID 本来就在
+  Value 里，不重复保存），父指针与深度不导出，节点集中在一块 `[]Node[T]` 里
+  分配。父键未命中默认视为根，提供 `IsRoot` 时改为严格（`ErrMissingParent`）；
+  重复 ID、自引用与环在构建期报错（`ErrDuplicateID`/`ErrCycle`），环检测用
+  “从根 BFS + 访问计数”，错误里带环路径。同层用 `Less` 稳定排序，顺序只来自
+  输入或稳定排序、不依赖 map 迭代。遍历用 `iter.Seq`：`Walk` 先序、`WalkLevel`
+  层序、`Descendants`/`Ancestors` 不含自身，`Path` 为根→自身；`Find` O(1)，
+  所有遍历与环检测用显式栈/队列，深链不爆栈。构建后只读，并发读取安全；
+  不做增删改、选中态、ASCII 渲染与 DTO 折叠。
 - `storage/`：对象存储 SPI（20 个方法：判存、读写（含区间与末尾 N 字节）、分片上传、
   磁盘上传下载、列举（含目录视图与流式 `Walk`）、批量/前缀删除、复制移动、预签名），
   零第三方依赖；`storage/s3/` 是唯一实现，同一份代码覆盖 AWS S3 与 OSS、COS、
