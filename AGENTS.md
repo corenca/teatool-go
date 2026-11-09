@@ -63,6 +63,8 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   写出并原子落盘；`Column.Type` 做校验与规范化，`Required`、`Validate`、结构体
   `Validate()` 逐行生效。不做引号/转义/字段内换行，字段宽度由表头或声明列数校验；
   末尾分隔符必须显式声明；`Sanitize` 在写出前替换字段内文本；只吃 UTF-8，BOM 自动剥离。
+  `ReadOptions.OnRowError` 进入容错读取：坏行汇总成 `*RowError`（带 `Text` 原文）
+  后跳过，文件级错误仍直接返回；同一行多个字段错误用 `errors.Join` 汇总。
 - `tree/`：只读层级树。`Build([]T, Config[T,K])` 从扁平邻接表一次构建
   `*Forest[T,K]`；节点 `Node[T]` 只存 `Value`/`Children`（ID/ParentID 本来就在
   Value 里，不重复保存），父指针与深度不导出，节点集中在一块 `[]Node[T]` 里

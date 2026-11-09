@@ -297,7 +297,7 @@ func TestEachIntoValidate(t *testing.T) {
 		t.Fatalf("ErrStop 不应作为错误返回: %v", err)
 	}
 	if len(rows) != 0 {
-		t.Fatalf("ErrStop 在解码前生效，应交付 0 行，得到 %d", len(rows))
+		t.Fatalf("ErrStop 应在交付前生效，应交付 0 行，得到 %d", len(rows))
 	}
 }
 

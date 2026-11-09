@@ -17,7 +17,8 @@ const utf8BOM = "\xEF\xBB\xBF"
 //
 // opts 必须声明 Delimiter 与 Columns；有表头时按 Header 匹配，NoHeader 时按位置
 // 对应。任何一条记录出错都会返回错误（此时结果为 nil），行级错误是 *RowError。
-// 大文件请用 Each，避免把所有记录留在内存。
+// 配置 OnRowError 后改为容错读取：坏行跳过并交给处理器，返回的切片只含成功行，
+// 整体 error 为 nil。大文件请用 Each，避免把所有记录留在内存。
 func Read(r io.Reader, opts ReadOptions) ([]map[string]string, error) {
 	var rows []map[string]string
 	err := Each(r, opts, func(_ int, row map[string]string) error {
@@ -37,7 +38,8 @@ func Read(r io.Reader, opts ReadOptions) ([]map[string]string, error) {
 // 结束，其他错误会被包装成 *RowError。fn 不能为 nil。
 //
 // opts 非法返回 ErrInvalidOption/ErrInvalidColumn；表头缺列返回
-// ErrMissingColumn，表头重复返回 ErrDuplicateColumn。
+// ErrMissingColumn，表头重复返回 ErrDuplicateColumn。配置 OnRowError 后，
+// 行级错误会跳过该行并继续，详见 ReadOptions.OnRowError。
 func Each(r io.Reader, opts ReadOptions, fn func(line int, row map[string]string) error) error {
 	cols, err := opts.prepare()
 	if err != nil {
@@ -48,16 +50,22 @@ func Each(r io.Reader, opts ReadOptions, fn func(line int, row map[string]string
 	}
 	return eachRecord(r, opts, cols, func(line int, fields []string) error {
 		row := make(map[string]string, len(cols))
+		problems := make([]fieldProblem, 0, len(cols))
 		for i, c := range cols {
 			raw := fields[i]
 			if raw == "" && c.Required {
-				return &RowError{Line: line, Column: c.Key, Err: errors.New("必填字段为空")}
+				problems = append(problems, fieldProblem{column: c.Key, err: errors.New("必填字段为空")})
+				continue
 			}
 			value, err := normalizeValue(c, raw)
 			if err != nil {
-				return &RowError{Line: line, Column: c.Key, Err: err}
+				problems = append(problems, fieldProblem{column: c.Key, err: err})
+				continue
 			}
 			row[c.Key] = value
+		}
+		if err := joinFieldErrors(line, problems); err != nil {
+			return err
 		}
 		if opts.Validate != nil {
 			if err := opts.Validate(line, row); err != nil {
@@ -178,7 +186,7 @@ func eachRecord(r io.Reader, opts ReadOptions, cols []Column, fn func(line int, 
 		}
 		fields, err := splitRecord(header, opts, true)
 		if err != nil {
-			return &RowError{Line: lr.line, Err: err}
+			return &RowError{Line: lr.line, Text: header, Err: err}
 		}
 		width = len(fields)
 		if err := mapHeader(cols, fields, positions); err != nil {
@@ -199,11 +207,19 @@ func eachRecord(r io.Reader, opts ReadOptions, cols []Column, fn func(line int, 
 		}
 		fields, err := splitRecord(raw, opts, opts.TrimSpace)
 		if err != nil {
-			return &RowError{Line: lr.line, Err: err}
+			rowErr := &RowError{Line: lr.line, Err: err}
+			if herr := opts.handleRowError(lr.line, raw, rowErr); herr != nil {
+				return herr
+			}
+			continue
 		}
 		if len(fields) != width {
-			return &RowError{Line: lr.line, Err: fmt.Errorf(
+			rowErr := &RowError{Line: lr.line, Err: fmt.Errorf(
 				"%w: 需要 %d 个字段，实际 %d 个", ErrColumnMismatch, width, len(fields))}
+			if herr := opts.handleRowError(lr.line, raw, rowErr); herr != nil {
+				return herr
+			}
+			continue
 		}
 		picked := make([]string, len(cols))
 		for i, p := range positions {
@@ -213,12 +229,39 @@ func eachRecord(r io.Reader, opts ReadOptions, cols []Column, fn func(line int, 
 			if errors.Is(err, ErrStop) {
 				return nil
 			}
-			if _, ok := errors.AsType[*RowError](err); ok {
-				return err
+			if rowErr, ok := errors.AsType[*RowError](err); ok {
+				if herr := opts.handleRowError(lr.line, raw, rowErr); herr != nil {
+					return herr
+				}
+				continue
 			}
-			return &RowError{Line: lr.line, Err: err}
+			return &RowError{Line: lr.line, Text: raw, Err: err}
 		}
 	}
+}
+
+// handleRowError 补齐行级错误的行号与原文，并按 OnRowError 决定继续或中止。
+//
+// 返回 nil 表示错误已交给调用方处理、可以继续读下一行；否则是要向上返回的
+// 错误。未配置 OnRowError 时返回补全后的错误，保持快速失败语义。
+func (o ReadOptions) handleRowError(line int, text string, rowErr *RowError) error {
+	if rowErr.Line == 0 || rowErr.Text == "" {
+		clone := *rowErr
+		if clone.Line == 0 {
+			clone.Line = line
+		}
+		if clone.Text == "" {
+			clone.Text = text
+		}
+		rowErr = &clone
+	}
+	if o.OnRowError == nil {
+		return rowErr
+	}
+	if err := o.OnRowError(rowErr); err != nil {
+		return err
+	}
+	return nil
 }
 
 // mapHeader 建立「声明列 → 记录位置」映射。

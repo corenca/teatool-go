@@ -6,6 +6,8 @@
 //
 // 读取用 Read/Each 得到 []map[string]string 或逐行回调，用
 // ReadInto/EachInto 映射到结构体；文件入口是 ReadFile/EachFile 等。
+// 配置 ReadOptions.OnRowError 可跳过坏行继续读取，用来先加载好行、再汇总
+// 行级错误生成报告。
 // 写出用 Writer（map 层）或 StructWriter（结构体层），逐行追加后 Close 提交；
 // 文件句柄通过同目录临时文件加 rename 原子落盘。所有读取都是一次性消费的流，
 // 大文件请用 Each/EachFile，不会把整个文件读入内存。
@@ -88,7 +90,15 @@ type ReadOptions struct {
 	// map 层的键是 Column.Key，值已类型规范化；结构体层的键是 tag 表头，
 	// 值是原始文本（TrimSpace 之后）。返回 ErrStop 表示成功提前结束；
 	// 返回其他错误会被包装成 *RowError；若返回的已是 *RowError，则原样透传。
+	// 字段解码已经失败的行不会调用 Validate。
 	Validate func(line int, row map[string]string) error
+	// OnRowError 非 nil 时进入容错读取：行级错误（切分、列数、类型、必填、
+	// Validate）不再中止读取，该行被跳过并交给它处理，后续行继续读。
+	// 同一行多个字段错误会汇总成一个 *RowError（Err 为 errors.Join 的结果）。
+	// 返回 nil 表示继续；返回非 nil 立即中止，并原样返回该错误。
+	// 文件级错误（选项、表头、IO）以及回调返回的普通错误不受影响，仍然直接
+	// 返回。配置后 Read/ReadInto 只返回成功行，整体 error 为 nil。
+	OnRowError func(*RowError) error
 }
 
 // WriteOptions 控制一次写出。
@@ -111,11 +121,14 @@ type WriteOptions struct {
 // RowError 是带位置的读取/写出行级错误。
 //
 // Line 是物理行号（1-based，含表头与跳过行）；Column 是出错列的 Key（结构体层
-// 为 tag 表头），整行错误时为空。用 errors.AsType 取出，再用 Unwrap/errors.Is
-// 判断原因。
+// 为 tag 表头），整行错误或同一行多列出错时为空。Text 是出错记录的原始行
+// （不含行尾换行），用于生成错误报告；它不会被 Error() 输出，避免日志泄漏原文。
+// 同一行多个字段错误会汇总：Err 为 errors.Join 的结果，各列原因带列名。
+// 用 errors.AsType 取出，再用 Unwrap/errors.Is 判断原因。
 type RowError struct {
 	Line   int
 	Column string
+	Text   string
 	Err    error
 }
 
@@ -248,4 +261,28 @@ func (o WriteOptions) checkBase() error {
 	default:
 		return fmt.Errorf("%w: LineEnding 只能是 \\n 或 \\r\\n", ErrInvalidOption)
 	}
+}
+
+// fieldProblem 是一条记录里某一列的解析错误。
+type fieldProblem struct {
+	column string
+	err    error
+}
+
+// joinFieldErrors 把同一行的字段错误汇总成一个 *RowError。
+//
+// 只有一个错误时保留 Column；多个时 Column 为空，错误信息按「列: 原因」
+// 汇总，errors.Is 仍能命中被 %w 包装的哨兵。没有错误时返回 nil。
+func joinFieldErrors(line int, problems []fieldProblem) *RowError {
+	switch len(problems) {
+	case 0:
+		return nil
+	case 1:
+		return &RowError{Line: line, Column: problems[0].column, Err: problems[0].err}
+	}
+	errs := make([]error, len(problems))
+	for i, p := range problems {
+		errs[i] = fmt.Errorf("%s: %w", p.column, p.err)
+	}
+	return &RowError{Line: line, Err: errors.Join(errs...)}
 }

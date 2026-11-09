@@ -32,6 +32,7 @@ type fieldSpec struct {
 // ReadInto 读取 r 并映射成结构体切片。
 //
 // 字段与 tag 决定列；不接受 opts.Columns（非空返回 ErrInvalidColumn）。
+// 配置 OnRowError 后改为容错读取：坏行跳过并交给处理器，只返回成功行。
 // 大文件请用 EachInto，避免把所有记录留在内存。
 func ReadInto[T any](r io.Reader, opts ReadOptions) ([]T, error) {
 	var out []T
@@ -49,7 +50,8 @@ func ReadInto[T any](r io.Reader, opts ReadOptions) ([]T, error) {
 //
 // 字段与 tag 决定列；不接受 opts.Columns（非空返回 ErrInvalidColumn）。
 // line 是物理行号（1-based，含表头与跳过行）。fn 返回 ErrStop 表示成功提前
-// 结束，其他错误会被包装成 *RowError。fn 不能为 nil。
+// 结束，其他错误会被包装成 *RowError。fn 不能为 nil。配置 OnRowError 后，
+// 行级错误会跳过该行并继续，详见 ReadOptions.OnRowError。
 func EachInto[T any](r io.Reader, opts ReadOptions, fn func(line int, value T) error) error {
 	if err := opts.checkBase(); err != nil {
 		return err
@@ -66,6 +68,10 @@ func EachInto[T any](r io.Reader, opts ReadOptions, fn func(line int, value T) e
 		cols[i] = Column{Header: f.header, Key: f.header, Required: f.required}
 	}
 	return eachRecord(r, opts, cols, func(line int, values []string) error {
+		value, err := decodeStruct[T](fields, values, line)
+		if err != nil {
+			return err
+		}
 		if opts.Validate != nil {
 			row := make(map[string]string, len(fields))
 			for i, f := range fields {
@@ -81,9 +87,8 @@ func EachInto[T any](r io.Reader, opts ReadOptions, fn func(line int, value T) e
 				return &RowError{Line: line, Err: err}
 			}
 		}
-		value, err := decodeStruct[T](fields, values, line)
-		if err != nil {
-			return err
+		if err := validateStruct(&value); err != nil {
+			return &RowError{Line: line, Err: err}
 		}
 		return fn(line, value)
 	})
@@ -237,30 +242,38 @@ func implementsTextUnmarshaler(t reflect.Type) bool {
 	return t.Implements(textUnmarshalerType) || reflect.PointerTo(t).Implements(textUnmarshalerType)
 }
 
-// decodeStruct 把一行字段转换成结构体并执行 Validate。
+// decodeStruct 把一行字段转换成结构体，汇总所有字段错误；不执行 Validate。
 func decodeStruct[T any](fields []fieldSpec, values []string, line int) (T, error) {
 	var out T
 	root := reflect.ValueOf(&out).Elem()
+	problems := make([]fieldProblem, 0, len(fields))
 	for i, f := range fields {
-		if err := setStructField(root, f, values[i], line); err != nil {
-			var zero T
-			return zero, err
+		if err := setStructField(root, f, values[i]); err != nil {
+			problems = append(problems, fieldProblem{column: f.header, err: err})
 		}
 	}
-	if validator, ok := any(&out).(interface{ Validate() error }); ok {
-		if err := validator.Validate(); err != nil {
-			var zero T
-			return zero, &RowError{Line: line, Err: err}
-		}
+	if err := joinFieldErrors(line, problems); err != nil {
+		var zero T
+		return zero, err
 	}
 	return out, nil
 }
 
+// validateStruct 调用结构体可选的 Validate 方法。
+func validateStruct[T any](value *T) error {
+	if validator, ok := any(value).(interface{ Validate() error }); ok {
+		return validator.Validate()
+	}
+	return nil
+}
+
 // setStructField 把一列字符串写入根结构体下的叶子字段。
-func setStructField(root reflect.Value, f fieldSpec, raw string, line int) error {
+//
+// 错误不带行号与列名，由 decodeStruct 统一汇总。
+func setStructField(root reflect.Value, f fieldSpec, raw string) error {
 	if raw == "" {
 		if f.required {
-			return &RowError{Line: line, Column: f.header, Err: errors.New("必填字段为空")}
+			return errors.New("必填字段为空")
 		}
 		return nil // 非指针保持零值；指针保持 nil
 	}
@@ -270,7 +283,7 @@ func setStructField(root reflect.Value, f fieldSpec, raw string, line int) error
 		holder = reflect.New(f.typ)
 	}
 	if err := parseFieldValue(holder, f, raw); err != nil {
-		return &RowError{Line: line, Column: f.header, Err: err}
+		return err
 	}
 	if f.pointer {
 		dst.Set(holder)

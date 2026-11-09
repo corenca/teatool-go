@@ -260,10 +260,85 @@ case errors.Is(err, dsv.ErrIllegalField):
 }
 ```
 
+`RowError.Text` 保存出错记录的原始行（不含行尾换行），用于生成错误报告；它
+不会被 `Error()` 输出，避免日志整体打印时泄漏原文。
+
 常用哨兵：`ErrInvalidOption`、`ErrInvalidColumn`、`ErrMissingColumn`、
 `ErrDuplicateColumn`、`ErrColumnMismatch`、`ErrMissingKey`、`ErrIllegalField`、
 `ErrEmptyFile`、`ErrStop`、`ErrClosed`。表头级错误（缺列、重复表头、空文件）
 直接返回哨兵，不包装成 `*RowError`。
+
+## 容错读取：记录坏行并继续
+
+默认是快速失败：第一行出错就停止，`Read` 返回 `nil, err`。如果业务要求「好行
+照常加载、坏行记录下来稍后输出报告」，配置 `OnRowError`：
+
+```go
+var issues []*dsv.RowError
+rows, err := dsv.ReadFile("users.txt", dsv.ReadOptions{
+	Delimiter: "!^",
+	Columns: []dsv.Column{
+		{Header: "姓名", Key: "name", Required: true},
+		{Header: "年龄", Key: "age", Type: dsv.Int},
+		{Header: "分数", Key: "score", Type: dsv.Float},
+	},
+	OnRowError: func(e *dsv.RowError) error {
+		issues = append(issues, e)
+		return nil
+	},
+})
+if err != nil {
+	// 只剩文件级错误：选项、表头、IO
+}
+
+// rows 只包含成功行；issues 每项对应一个坏行
+for _, e := range issues {
+	fmt.Printf("第 %d 行: %v\n原文: %s\n", e.Line, e.Err, e.Text)
+}
+```
+
+语义：
+
+- **每行最多回调一次**。同一行多个字段出错会汇总，`e.Err` 是 `errors.Join`
+  的结果，信息按 `列: 原因` 分行；此时 `e.Column` 为空。单列出错时 `e.Column`
+  保留该列的 `Key`（结构体层是 tag 表头）。
+- **`e.Text` 是原始行**，不含行尾换行；不在 `Error()` 里，报告由业务方自行生成。
+- 行级错误包括切分失败、字段数不符、类型解析、必填为空、`Validate` 返回错误。
+- 字段解码已失败的行不会再调用 `Validate`（map 层与结构体层一致）。
+- 处理器返回 `nil` 继续读下一行；返回非 `nil` 立即中止，`Read` 原样返回该错误。
+- 表头级错误（缺列、重复、空文件）、选项错误、IO 错误仍然直接返回，不会进入
+  处理器。回调返回的普通错误属于业务失败，也不会被当作坏行跳过。
+
+需要把报告落到文件时，直接复用本包的写出能力（报告格式由业务决定）：
+
+```go
+w, err := dsv.NewFileWriter("issues.txt", dsv.WriteOptions{
+	Delimiter: "!^",
+	Columns: []dsv.Column{
+		{Header: "行号", Key: "line"},
+		{Header: "原因", Key: "reason"},
+		{Header: "原文", Key: "text"},
+	},
+	Sanitize: func(s string) string {
+		s = strings.ReplaceAll(s, "!^", " ")
+		return strings.NewReplacer("\n", " ", "\r", " ").Replace(s)
+	},
+})
+if err != nil {
+	return err
+}
+defer w.Abort()
+for _, e := range issues {
+	if err := w.Write(map[string]string{
+		"line":   strconv.Itoa(e.Line),
+		"reason": e.Err.Error(),
+		"text":   e.Text,
+	}); err != nil {
+		return err
+	}
+}
+return w.Close()
+```
 
 ## 常见错误
 
