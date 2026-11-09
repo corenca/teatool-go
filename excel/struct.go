@@ -34,7 +34,8 @@ type fieldSpec struct {
 //
 // 字段与 tag 决定列；不接受 opts.Columns。T 只出现在返回值，调用时必须
 // 显式写 s.ReadInto[User](opts)。列/tag 无效返回 ErrInvalidColumn；Reader
-// 已关闭返回 ErrClosed；行级错误以 *RowError 返回。
+// 已关闭返回 ErrClosed；行级错误以 *RowError 返回。配置 OnRowError 后改为
+// 容错读取：坏行跳过并交给处理器，只返回成功行。
 func (s *SheetReader) ReadInto[T any](opts ReadOptions) ([]T, error) {
 	var out []T
 	err := eachIntoSheet[T](s, opts, func(_ int, value T) error {
@@ -52,7 +53,8 @@ func (s *SheetReader) ReadInto[T any](opts ReadOptions) ([]T, error) {
 // 字段与 tag 决定列；不接受 opts.Columns。rowNum 是 Excel 物理行号
 // （1-based，含表头与跳过行）。回调返回 ErrStop 表示成功提前结束，其他
 // 错误会包装成 *RowError；结构体转换/Validate 错误也以 *RowError 返回。
-// Reader 已关闭返回 ErrClosed。fn 不能为 nil。
+// Reader 已关闭返回 ErrClosed。fn 不能为 nil。配置 OnRowError 后，行级错误
+// 会跳过该行并继续，详见 ReadOptions.OnRowError。
 func (s *SheetReader) EachInto[T any](opts ReadOptions, fn func(rowNum int, value T) error) error {
 	return eachIntoSheet[T](s, opts, fn)
 }
@@ -69,35 +71,49 @@ func eachIntoSheet[T any](s *SheetReader, opts ReadOptions, fn func(rowNum int, 
 	cols := make([]Column, len(fields))
 	for i, f := range fields {
 		// 结构体层用表头作为内部键，行级错误里显示的就是用户看到的那一列。
-		cols[i] = Column{Header: f.header, Key: f.header, Required: f.required}
+		// Required 由 decodeStructValue 汇总，避免 readRows 提前短路导致其他
+		// 字段的错误无法进入同一份报告。
+		cols[i] = Column{Header: f.header, Key: f.header}
 	}
 	opts.Columns = cols
 
-	return s.read(opts, hasTime, func(rowNum int, row map[string]string, date1904 bool) error {
+	return s.read(opts, hasTime, false, func(rowNum int, row map[string]string, date1904 bool) error {
 		value, err := decodeStructValue[T](typ, fields, row, rowNum, date1904)
 		if err != nil {
 			return err
+		}
+		if vErr := validateRow(opts, rowNum, row); vErr != nil {
+			return vErr
+		}
+		if err := validateStructValue(&value); err != nil {
+			return &RowError{Row: rowNum, Err: err}
 		}
 		return fn(rowNum, value)
 	})
 }
 
-// decodeStructValue 把一行 map 转换成结构体并执行 Validate。
+// decodeStructValue 把一行 map 转换成结构体，汇总所有字段错误；不执行 Validate。
 func decodeStructValue[T any](typ reflect.Type, fields []fieldSpec, row map[string]string, rowNum int, date1904 bool) (T, error) {
 	value := reflect.New(typ).Elem()
+	problems := make([]rowProblem, 0, len(fields))
 	for _, f := range fields {
-		if err := setStructField(value, f, row[f.header], rowNum, date1904); err != nil {
-			var zero T
-			return zero, err
+		if err := setStructField(value, f, row[f.header], date1904); err != nil {
+			problems = append(problems, rowProblem{column: f.header, err: err})
 		}
 	}
-	if validator, ok := value.Addr().Interface().(interface{ Validate() error }); ok {
-		if err := validator.Validate(); err != nil {
-			var zero T
-			return zero, &RowError{Row: rowNum, Err: err}
-		}
+	if err := joinRowErrors(rowNum, problems); err != nil {
+		var zero T
+		return zero, err
 	}
 	return value.Interface().(T), nil
+}
+
+// validateStructValue 调用结构体可选的 Validate 方法。
+func validateStructValue[T any](value *T) error {
+	if validator, ok := any(value).(interface{ Validate() error }); ok {
+		return validator.Validate()
+	}
+	return nil
 }
 
 // StructSheetWriter 是绑定到具体结构体类型的 sheet 流式写出句柄。
@@ -387,23 +403,23 @@ func implementsTextUnmarshaler(t reflect.Type) bool {
 }
 
 // setStructField 把一列字符串写入根结构体下的叶子字段。
-func setStructField(root reflect.Value, f fieldSpec, raw string, rowNum int, date1904 bool) error {
+func setStructField(root reflect.Value, f fieldSpec, raw string, date1904 bool) error {
 	if raw == "" {
 		if f.required {
-			return &RowError{Row: rowNum, Column: f.header, Err: errors.New("必填字段为空")}
+			return errors.New("必填字段为空")
 		}
 		return nil
 	}
 	dst, err := fieldByIndexAlloc(root, f.index)
 	if err != nil {
-		return &RowError{Row: rowNum, Column: f.header, Err: err}
+		return err
 	}
 	holder := dst
 	if f.pointer {
 		holder = reflect.New(f.typ)
 	}
 	if err := parseFieldValue(holder, f, raw, date1904); err != nil {
-		return &RowError{Row: rowNum, Column: f.header, Err: err}
+		return err
 	}
 	if f.pointer {
 		dst.Set(holder)

@@ -217,10 +217,10 @@ func (s *SheetReader) Info() SheetInfo { return s.info }
 // 每个 map 的键来自 Column.Key；声明之外的多余列忽略，声明的列在表头中
 // 不存在时返回 ErrMissingColumn。空行会被跳过，但行号继续推进。
 // 校验回调返回 ErrStop 时返回已收集的行与 nil；Reader 已关闭时返回 ErrClosed。
-// 行级错误以 *RowError 返回。
+// 行级错误以 *RowError 返回；配置 OnRowError 后改为容错读取，只返回成功行。
 func (s *SheetReader) Read(opts ReadOptions) ([]map[string]string, error) {
 	var out []map[string]string
-	err := s.read(opts, false, func(_ int, row map[string]string, _ bool) error {
+	err := s.read(opts, false, true, func(_ int, row map[string]string, _ bool) error {
 		out = append(out, row)
 		return nil
 	})
@@ -234,14 +234,15 @@ func (s *SheetReader) Read(opts ReadOptions) ([]map[string]string, error) {
 //
 // rowNum 是 Excel 物理行号（1-based，含表头与跳过行）；返回 ErrStop 表示
 // 成功提前结束，其他错误会以 *RowError 包装；Reader 已关闭时返回 ErrClosed。
+// 配置 OnRowError 后，行级错误会跳过该行并继续，详见 ReadOptions.OnRowError。
 func (s *SheetReader) Each(opts ReadOptions, fn func(rowNum int, row map[string]string) error) error {
-	return s.read(opts, false, func(rowNum int, row map[string]string, _ bool) error {
+	return s.read(opts, false, true, func(rowNum int, row map[string]string, _ bool) error {
 		return fn(rowNum, row)
 	})
 }
 
 // read 是 Read/Each 的公共实现。
-func (s *SheetReader) read(opts ReadOptions, forceDate1904 bool, fn rowFunc) error {
+func (s *SheetReader) read(opts ReadOptions, forceDate1904, validate bool, fn rowFunc) error {
 	if err := s.reader.check(); err != nil {
 		return err
 	}
@@ -254,7 +255,7 @@ func (s *SheetReader) read(opts ReadOptions, forceDate1904 bool, fn rowFunc) err
 	if err != nil {
 		return err
 	}
-	return readRows(s.reader.file, s.name, opts, cols, date1904, fn)
+	return readRows(s.reader.file, s.name, opts, cols, date1904, validate, fn)
 }
 
 // hasDateType 判断列声明里是否有需要 1904 标记的日期类型。
@@ -276,7 +277,7 @@ func prepareRead(opts ReadOptions) ([]Column, error) {
 }
 
 // readRows 逐行读取并交给 fn，负责表头解析、空行跳过与行号维护。
-func readRows(f *excelize.File, sheet string, opts ReadOptions, cols []Column, date1904 bool, fn rowFunc) (err error) {
+func readRows(f *excelize.File, sheet string, opts ReadOptions, cols []Column, date1904, validate bool, fn rowFunc) (err error) {
 	rows, err := f.Rows(sheet)
 	if err != nil {
 		return err
@@ -330,7 +331,12 @@ func readRows(f *excelize.File, sheet string, opts ReadOptions, cols []Column, d
 		}
 		if opts.NoHeader {
 			if len(cells) > len(cols) {
-				return fmt.Errorf("%w: 第 %d 行有 %d 列，声明 %d 列", ErrColumnMismatch, rowNum, len(cells), len(cols))
+				rowErr := &RowError{Row: rowNum, Err: fmt.Errorf(
+					"%w: 有 %d 列，声明 %d 列", ErrColumnMismatch, len(cells), len(cols))}
+				if herr := opts.handleRowError(rowNum, cells, rowErr); herr != nil {
+					return herr
+				}
+				continue
 			}
 			if len(cells) > maxWidth {
 				maxWidth = len(cells)
@@ -342,6 +348,7 @@ func readRows(f *excelize.File, sheet string, opts ReadOptions, cols []Column, d
 		sawData = true
 
 		row := make(map[string]string, len(cols))
+		problems := make([]rowProblem, 0, len(cols))
 		for i, c := range cols {
 			value := ""
 			if idx := indexes[i]; idx >= 0 && idx < len(cells) {
@@ -349,36 +356,50 @@ func readRows(f *excelize.File, sheet string, opts ReadOptions, cols []Column, d
 			}
 			if value == "" {
 				if c.Required {
-					return &RowError{Row: rowNum, Column: c.Key, Err: errors.New("必填列为空")}
+					problems = append(problems, rowProblem{column: c.Key, err: errors.New("必填列为空")})
+					continue
 				}
 				row[c.Key] = ""
 				continue
 			}
 			converted, convErr := convertValue(c, value, date1904)
 			if convErr != nil {
-				return &RowError{Row: rowNum, Column: c.Key, Err: convErr}
+				problems = append(problems, rowProblem{column: c.Key, err: convErr})
+				continue
 			}
 			row[c.Key] = converted
 		}
-		if opts.Validate != nil {
-			if vErr := opts.Validate(rowNum, row); vErr != nil {
+		if rowErr := joinRowErrors(rowNum, problems); rowErr != nil {
+			if herr := opts.handleRowError(rowNum, cells, rowErr); herr != nil {
+				return herr
+			}
+			continue
+		}
+		if validate {
+			if vErr := validateRow(opts, rowNum, row); vErr != nil {
 				if errors.Is(vErr, ErrStop) {
 					return nil
 				}
-				if _, ok := errors.AsType[*RowError](vErr); ok {
-					return vErr
+				if rowErr, ok := errors.AsType[*RowError](vErr); ok {
+					if herr := opts.handleRowError(rowNum, cells, rowErr); herr != nil {
+						return herr
+					}
+					continue
 				}
-				return &RowError{Row: rowNum, Err: vErr}
+				return vErr
 			}
 		}
 		if fErr := fn(rowNum, row, date1904); fErr != nil {
 			if errors.Is(fErr, ErrStop) {
 				return nil
 			}
-			if _, ok := errors.AsType[*RowError](fErr); ok {
-				return fErr
+			if rowErr, ok := errors.AsType[*RowError](fErr); ok {
+				if herr := opts.handleRowError(rowNum, cells, rowErr); herr != nil {
+					return herr
+				}
+				continue
 			}
-			return &RowError{Row: rowNum, Err: fErr}
+			return &RowError{Row: rowNum, Cells: cells, Err: fErr}
 		}
 	}
 	if err := rows.Error(); err != nil {
@@ -386,6 +407,48 @@ func readRows(f *excelize.File, sheet string, opts ReadOptions, cols []Column, d
 	}
 	if opts.NoHeader && sawData && maxWidth < len(cols) {
 		return fmt.Errorf("%w: 文件最宽行 %d 列，声明 %d 列", ErrColumnMismatch, maxWidth, len(cols))
+	}
+	return nil
+}
+
+// validateRow 执行 ReadOptions.Validate，并把普通错误包装成 *RowError。
+func validateRow(opts ReadOptions, rowNum int, row map[string]string) error {
+	if opts.Validate == nil {
+		return nil
+	}
+	vErr := opts.Validate(rowNum, row)
+	if vErr == nil {
+		return nil
+	}
+	if errors.Is(vErr, ErrStop) {
+		return ErrStop
+	}
+	if _, ok := errors.AsType[*RowError](vErr); ok {
+		return vErr
+	}
+	return &RowError{Row: rowNum, Err: vErr}
+}
+
+// handleRowError 补齐行级错误的行号与原始单元格，并按 OnRowError 决定继续或中止。
+//
+// 返回 nil 表示错误已交给调用方处理、可以继续读下一行；否则是要向上返回的
+// 错误。未配置 OnRowError 时返回补全后的错误，保持快速失败语义。
+func (o ReadOptions) handleRowError(rowNum int, cells []string, rowErr *RowError) error {
+	if rowErr.Row == 0 || rowErr.Cells == nil {
+		clone := *rowErr
+		if clone.Row == 0 {
+			clone.Row = rowNum
+		}
+		if clone.Cells == nil {
+			clone.Cells = cells
+		}
+		rowErr = &clone
+	}
+	if o.OnRowError == nil {
+		return rowErr
+	}
+	if err := o.OnRowError(rowErr); err != nil {
+		return err
 	}
 	return nil
 }

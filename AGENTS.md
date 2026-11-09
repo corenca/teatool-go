@@ -50,7 +50,9 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   `Builder`/`SheetWriter`（`NewBuilder`/`NewFileBuilder` → `AddSheet`/
   `AddSheetFrom`/`AddSheetRows`/`WriteFrom` → `Close`/`Abort`）；单 sheet 文件另有
   `ReadFile`/`ReadFileInto`/`WriteFile`/`WriteFileFrom`。读取严格按声明：多余列忽略，缺列报错；无表头模式声明列数必须
-  等于文件实际列宽。值统一 string，`Type` 只做校验与规范化，map 层的日期类型必须
+  等于文件实际列宽。`ReadOptions.OnRowError` 进入容错读取：坏行汇总成 `*RowError`
+  （带 `Cells` 原始单元格）后跳过，文件级错误仍直接返回；同一行多个错误用
+  `errors.Join` 汇总。值统一 string，`Type` 只做校验与规范化，map 层的日期类型必须
   `RawValues=true`（取序列号）；结构体层 `time.Time` 先按 layout、失败再按序列号
   解析。结构体层还支持 `encoding.TextMarshaler`/`TextUnmarshaler` 与嵌套/匿名字段
   展平：父字段 tag 第一段作为前缀，嵌套指针按需分配，只调用顶层 Validate。

@@ -279,6 +279,56 @@ if rowErr, ok := errors.AsType[*excel.RowError](err); ok {
 `errors.AsType` 从 Go 1.26 开始提供，本项目要求 Go 1.27+，优先使用它；`errors.As` 仍然可用。
 
 `RowError.Column` 在 map 层是 `Column.Key`，在结构体层是字段 tag 的表头。
+`RowError.Cells` 保存出错行的实际单元格值（按列顺序），用于生成错误报告；它不会
+被 `Error()` 输出，避免日志整体打印时泄漏整行数据。
+
+## 容错读取：记录坏行并继续
+
+默认是快速失败：第一行出错就停止，`Read` 返回 `nil, err`。如果业务要求「好行
+照常加载、坏行记录下来稍后输出报告」，配置 `OnRowError`：
+
+```go
+r, err := excel.OpenFile("users.xlsx")
+if err != nil {
+	return err
+}
+defer r.Close()
+
+s, err := r.Sheet("用户")
+if err != nil {
+	return err
+}
+
+var issues []*excel.RowError
+rows, err := s.Read(excel.ReadOptions{
+	Columns: cols,
+	OnRowError: func(e *excel.RowError) error {
+		issues = append(issues, e)
+		return nil
+	},
+})
+if err != nil {
+	// 只剩文件级错误：表头、空 sheet、IO
+}
+
+// rows 只包含成功行；issues 每项对应一个坏行
+for _, e := range issues {
+	fmt.Printf("第 %d 行: %v\n原始单元格: %v\n", e.Row, e.Err, e.Cells)
+}
+```
+
+语义：
+
+- **每行最多回调一次**。同一行多个错误会汇总，`e.Err` 是 `errors.Join` 的结果，
+  信息按 `列: 原因` 分行；此时 `e.Column` 为空。单列出错时 `e.Column` 保留该列
+  （map 层是 `Key`，结构体层是 tag 表头）。
+- 行级错误包括必填为空、类型转换、`Validate`、结构体字段转换与结构体
+  `Validate()`，以及无表头模式下单元格数超出声明。
+- 字段解码已失败的行不会再调用 `Validate`。
+- 处理器返回 `nil` 继续读下一行；返回非 `nil` 立即中止，`Read` 原样返回该错误。
+- 表头缺失/重复、空 sheet、选项与 IO 错误仍然直接返回；回调返回的普通错误属于
+  业务失败，也不会被当作坏行跳过。
+- 报告格式由业务方决定：`Cells` 可以直接写文件、入库或拼邮件正文。
 
 ## 常见错误
 
