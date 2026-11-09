@@ -58,6 +58,11 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   以 `=` 开头的值按文本写。任一行写失败后 Builder 进入失败态，`Close` 返回原错误
   且不落盘，只能 `Abort`。行级错误带 Excel 物理行号。文件只做 xlsx，扩展名与 ZIP
   魔数双重校验。
+- `dsv/`：多字符分隔符的业务文本文件（一行一条记录，可带表头）。`Read`/`Each` 读成
+  `[]map[string]string`，`ReadInto`/`EachInto` 映射结构体，`Writer`/`StructWriter[T]`
+  写出并原子落盘；`Column.Type` 做校验与规范化，`Required`、`Validate`、结构体
+  `Validate()` 逐行生效。不做引号/转义/字段内换行，字段宽度由表头或声明列数校验；
+  末尾分隔符必须显式声明；`Sanitize` 在写出前替换字段内文本；只吃 UTF-8，BOM 自动剥离。
 - `tree/`：只读层级树。`Build([]T, Config[T,K])` 从扁平邻接表一次构建
   `*Forest[T,K]`；节点 `Node[T]` 只存 `Value`/`Children`（ID/ParentID 本来就在
   Value 里，不重复保存），父指针与深度不导出，节点集中在一块 `[]Node[T]` 里

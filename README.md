@@ -17,6 +17,7 @@ Go 业务工具库（module `github.com/corenca/teatool-go`，要求 Go 1.27.2�
 | `masking` | 字段与自由文本脱敏：十种内置业务类型、可注册自定义类型与自动识别规则 | [masking/README.md](masking/README.md) |
 | `gm` | 国密 SM2 / SM3 / SM4：配置项加密（SM4-GCM）、前后端报文加密（SM4-CBC + HMAC-SM3）、SM2 短数据加密、摘要与 HMAC | [gm/README.md](gm/README.md) |
 | `excel` | 组合式 xlsx 读写：`Reader`/`Builder` 多 sheet、单 sheet 文件一行入口、结构体映射、流式读写、行级错误行号 | [excel/README.md](excel/README.md) |
+| `dsv` | 多字符分隔符文本文件：声明式读取、流式逐行处理、结构体映射、类型校验、原子写出与字段替换 | [dsv/README.md](dsv/README.md) |
 | `tree` | 扁平邻接表一次构建只读森林：按 ID 查找、先序/层序遍历、路径与祖先、稳定的同层排序 | [tree/README.md](tree/README.md) |
 | `storage` | 对象存储统一契约：读写、区间与末尾 N 字节、分片上传、磁盘上传下载、列举与目录视图、批量删除、复制移动、预签名 | [storage/README.md](storage/README.md) |
 | `storage/s3` | 上述契约的 S3 实现，同一份代码覆盖 AWS S3、OSS、COS、OBS、MinIO | [storage/README.md](storage/README.md) |
