@@ -180,6 +180,11 @@ gofmt -l .                     # 提交前检查；有输出则 gofmt -w .
 
 - Conventional Commits：`type(scope): description`，中文描述不超过 50 字。
 - **不要自动提交**：完成改动后等 Corenca 明确要求；推送同理。
+- **例外**：Corenca 说「tag X.Y.Z」即视为一次性授权，直接完成下面整条链路，不再逐项确认：
+  跑提交前检查（gofmt / go vet / go test）→ `git add` 本次相关文件 → commit
+  （Conventional Commits，中文 ≤50 字）→ 打 **annotated** tag `vX.Y.Z`（消息用提交标题，
+  与 v0.1.x/v0.2.x/v0.3.0 一致）→ `git push origin <branch>` + `git push origin vX.Y.Z`。
+  没有可提交改动时只对当前 HEAD 打 tag 并推送 tag。
 - 只 `git add` 本次相关的文件。
 
 ## 协作约定
