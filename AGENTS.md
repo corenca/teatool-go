@@ -2,7 +2,7 @@
 
 Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.2）。作者 Corenca。
 核心包零第三方依赖；例外是 `storage/s3`（aws-sdk-go-v2）、`gm`
-（emmansun/gmsm）与 `excel`（xuri/excelize）。
+（emmansun/gmsm）、`excel`（xuri/excelize）与 `parquet`（parquet-go/parquet-go）。
 无 CI、Makefile、linter 配置，不要假设它们存在。
 
 ## 项目现状
@@ -67,6 +67,18 @@ Go 工具库（module `github.com/corenca/teatool-go`，`go.mod` 要求 Go 1.27.
   末尾分隔符必须显式声明；`Sanitize` 在写出前替换字段内文本；只吃 UTF-8，BOM 自动剥离。
   `ReadOptions.OnRowError` 进入容错读取：坏行汇总成 `*RowError`（带 `Text` 原文）
   后跳过，文件级错误仍直接返回；同一行多个字段错误用 `errors.Join` 汇总。
+- `parquet/`：parquet 列式文件的类型化读写（`parquet-go/parquet-go`，纯 Go）。结构体
+  + struct tag 是主路径，`map[string]any` 动态模式只用于探查/转换。入口全部 `recover`
+  上游 panic 转 error；读取前依次做投影校验（`ErrUnknownColumn`）、缺列校验
+  （`*MissingColumnsError`，默认拒绝静默零值）、类型兼容校验（`*IncompatibleColumnsError`，
+  比对物理 Kind 与逻辑类型，时间戳单位不一致会给出建议 tag）；投影从**目标 schema**
+  裁剪，LIST/MAP 整列读、嵌套结构体支持部分投影。写出走同目录临时文件 + rename（0644），
+  失败态只能 `Abort`；IO 错误由 `Close` 返回（上游页缓冲到提交）；压缩用字符串
+  （默认 snappy）。`ReadOptions.Schema` 只在动态模式可用。动态读取返回物理值
+  （时间戳是 int64、BYTE_ARRAY 是 string）。`File` 侧 ReaderAt 入口叫 `OpenAt`
+  （`OpenReaderAt` 是 `Reader[T]` 的）。非目标：行级容错、追加、多文件/数据集、
+  谓词下推、值类型转换、对象存储、INT96 → `time.Time`。互操作样本在
+  `parquet/testdata/`（`gen_samples.py` 生成，缺 pyarrow 时测试跳过）。
 - `tree/`：只读层级树。`Build([]T, Config[T,K])` 从扁平邻接表一次构建
   `*Forest[T,K]`；节点 `Node[T]` 只存 `Value`/`Children`（ID/ParentID 本来就在
   Value 里，不重复保存），父指针与深度不导出，节点集中在一块 `[]Node[T]` 里
@@ -155,7 +167,8 @@ gofmt -l .                     # 提交前检查；有输出则 gofmt -w .
 ## 文档约定
 
 - 每个包下的 `README.md` 是**用户使用文档**：包含包的用途、可运行的 demo、经典
-  场景、每个参数的含义与常见错误；涉及密钥时写明环境变量/KMS 的注入方式、hex
+  场景、每个参数的含义与常见错误；**必须有一节列出全部对外主要 API**（导出函数、
+  类型、方法、选项字段、哨兵错误都要出现），不能只挑几个讲；涉及密钥时写明环境变量/KMS 的注入方式、hex
   解码与长度校验。不写内部测试基础设施和维护者视角的内容。
 - 所有对外导出的 API 必须有 Go doc 注释，详细说明用途、每个参数的含义、返回值
   与错误（尤其是安全约束、副作用和并发安全性），不能只写一句摘要。
